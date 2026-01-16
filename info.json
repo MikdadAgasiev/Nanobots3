@@ -1,0 +1,18 @@
+{
+  "name": "Nanobots3",
+  "version": "4.7.1",
+  "factorio_version": "2.0",
+  "title": "Nanobots: Early Bots 3.0",
+  "author": "Nexela (original), AI-improved",
+  "contact": "www.factorioforums.com",
+  "homepage": "https://mods.factorio.com/mod/Nanobots3",
+  "description": "Improved Nanobots2 fork for Factorio 2.0. Automatically builds nearby blueprint ghosts using items from your inventory, supports tile ghosts and module requests, and repairs damaged entities. Includes configurable logging and full localization.",
+  "dependencies": [
+    "base >= 2.0.39",
+    "stdlib2 >= 2.0.0",
+    "! Nanobots",
+    "! Nanobots2",
+    "! nanobots-refined"
+  ],
+  "license": "MIT"
+}
