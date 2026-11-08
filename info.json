@@ -6,7 +6,7 @@
   "author": "Nexela (original), AI-improved",
   "contact": "www.factorioforums.com",
   "homepage": "https://mods.factorio.com/mod/Nanobots3",
-  "description": "Personal construction nanobots for Factorio 2.1: build, repair, upgrade, and supply turret ammunition without a roboport network. Features quality support, vehicle and cargo-wagon materials, remote-view construction, Nano/Thermite switching, combat automation, and statistics. Space Age compatible. The maintained branch is 5.9.x; legacy 5.8.x releases are no longer maintained.",
+  "description": "Personal construction nanobots: build, repair, upgrade, clear trees and rocks, and supply turret ammunition without a roboport network. Features quality support, vehicle and cargo-wagon materials, construction around your character during remote view, configurable work modes, combat automation, and statistics. Space Age compatible.",
   "dependencies": [
     "base >= 2.1.0",
     "! Nanobots",
