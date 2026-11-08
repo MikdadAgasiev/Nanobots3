@@ -27,3 +27,9 @@ require('prototypes/roboport-interface')
 
 --Sounds
 require('prototypes/sounds')
+
+-- v5.2: Shortcut for radius visualization
+require('prototypes/shortcut')
+
+-- v5.5.0: Auto-Defense System
+require('prototypes/auto-defense-input')

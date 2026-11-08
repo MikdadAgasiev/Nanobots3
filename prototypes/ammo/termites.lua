@@ -156,7 +156,17 @@ local projectile_termites = {
 }
 
 -------------------------------------------------------------------------------
-data:extend({recipe, termites, cloud_big_termites, cloud_small_termites, projectile_termites})
+local cloud_rocks = table.deepcopy(cloud_small_termites)
+cloud_rocks.name = 'nano-cloud-rocks'
+cloud_rocks.action = nil
+local projectile_rocks = table.deepcopy(projectile_termites)
+projectile_rocks.name = 'nano-projectile-termites-rocks'
+projectile_rocks.final_action.action_delivery.target_effects = {
+    {type = 'script', effect_id = 'nanobots-termites-eat-rock'},
+    {type = 'create-entity', entity_name = 'nano-cloud-rocks', check_buildability = false}
+}
+data:extend({recipe, termites, cloud_big_termites, cloud_small_termites, projectile_termites, projectile_rocks, cloud_rocks})
 
 local effects = data.raw.technology['nanobots'].effects
 effects[#effects + 1] = {type = 'unlock-recipe', recipe = 'ammo-nano-termites'}
+

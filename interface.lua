@@ -1,4 +1,4 @@
-local Event = require('__stdlib2__/stdlib/event/event')
+local Event = require('__Nanobots3__/stdlib/event/event')
 local Queue = require('scripts/hash_queue')
 local interface = {}
 

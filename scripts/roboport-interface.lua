@@ -1,10 +1,23 @@
+-- Build the square BoundingBox directly, avoiding stdlib's Area lookup.
+local function expand_to_area(pos, radius)
+    radius = radius or 1
+    return {
+        left_top = {x = pos.x - radius, y = pos.y - radius},
+        right_bottom = {x = pos.x + radius, y = pos.y + radius}
+    }
+end
+
 -------------------------------------------------------------------------------
 --[[roboport-interface]]
 -------------------------------------------------------------------------------
-local Event = require('__stdlib2__/stdlib/event/event')
-local Position = require('__stdlib2__/stdlib/area/position')
-local table = require('__stdlib2__/stdlib/utils/table')
+local Event = require('__Nanobots3__/stdlib/event/event')
+local Position = require('__Nanobots3__/stdlib/area/position')
+local table = require('__Nanobots3__/stdlib/utils/table')
 local Queue = require('scripts/hash_queue')
+
+-- v5.2.1: Add SafeEntity
+local SafeEntity = require('scripts/safe_entity')
+
 local queue
 
 local floor = math.floor
@@ -63,30 +76,66 @@ parameters ={
     },
 }
 --]]
-local function get_parameters(params)
+local function get_parameters(behaviour)
     local parameters = {}
-    for _, param in pairs(params) do
-        if param.signal.name then
-            parameters[param.signal.name] = param.count
+    if not (behaviour and behaviour.valid) then
+        return parameters
+    end
+
+    -- Factorio 2.0+ constant combinators expose logistic sections instead
+    -- of the removed LuaConstantCombinatorControlBehavior.parameters.
+    for _, section in pairs(behaviour.sections or {}) do
+        if section.valid and section.active then
+            local multiplier = section.multiplier or 1
+            for _, filter in pairs(section.filters or {}) do
+                local signal = filter.value
+                if signal and signal.name then
+                    parameters[signal.name] = (parameters[signal.name] or 0) + ((filter.min or 0) * multiplier)
+                end
+            end
         end
     end
     return parameters
 end
 
+-- v5.2.1: Безопасное получение информации об entity
 local function get_entity_info(entity)
-    return entity.surface, entity.force, entity.position
+    if not SafeEntity.is_valid(entity) then
+        return nil, nil, nil
+    end
+    
+    local surface = SafeEntity.get_surface(entity)
+    local force = SafeEntity.get_property(entity, "force")
+    local position = SafeEntity.get_position(entity)
+    
+    return surface, force, position
 end
 
 Queue.mark_items_or_trees =
     function(data)
     if data.logistic_cell.valid and data.logistic_cell.construction_radius > 0 and data.logistic_cell.logistic_network then
         local surface, force, position = get_entity_info(data.logistic_cell.owner)
+        
+        -- v5.2.1: Проверка что все данные получены
+        if not (surface and force and position) then return end
+        
         if not (data.find_type or data.find_name) then
             data.find_type = 'NIL'
         end
-        if not surface.find_nearest_enemy {position = position, max_distance = data.logistic_cell.construction_radius * 1.5 + 40, force = force} then
+        
+        -- v5.2.1: Безопасный поиск врагов
+        local has_enemy = false
+        pcall(function()
+            has_enemy = surface.find_nearest_enemy {
+                position = position, 
+                max_distance = data.logistic_cell.construction_radius * 1.5 + 40, 
+                force = force
+            } ~= nil
+        end)
+        
+        if not has_enemy then
             local filter = {
-                area = Position.expand_to_area(position, data.logistic_cell.construction_radius),
+                area = expand_to_area(position, data.logistic_cell.construction_radius),
                 name = data.find_name,
                 type = data.find_type,
                 limit = 300
@@ -95,7 +144,15 @@ Queue.mark_items_or_trees =
             local available_bots = floor(data.logistic_cell.logistic_network.available_construction_robots - (data.logistic_cell.logistic_network.all_construction_robots * (config['nanobots-free-bots-per'].value / 100)))
             local limit = -99999999999
             if data.value < 0 and data.item_name then
-                limit = (data.logistic_cell.logistic_network.get_contents()[data.item_name] or 0) + data.value
+                -- Factorio 2.0: get_contents() returns array of {name, count, quality}
+                local item_count = 0
+                local contents = data.logistic_cell.logistic_network.get_contents()
+                for _, entry in pairs(contents) do
+                    if entry.name == data.item_name then
+                        item_count = item_count + entry.count
+                    end
+                end
+                limit = item_count + data.value
             end
 
             for _, item in pairs(surface.find_entities_filtered(filter)) do
@@ -117,7 +174,7 @@ local function has_resources(miner)
     local _find = function(v, _)
         return v.prototype.resource_category == 'basic-solid' and (v.amount > 0 or v.prototype.infinite_resource)
     end
-    local filter = {area = Position.expand_to_area(miner.position, miner.prototype.mining_drill_radius), type = 'resource'}
+    local filter = {area = expand_to_area(miner.position, miner.prototype.mining_drill_radius), type = 'resource'}
     if miner.mining_target then
         return (miner.mining_target.amount or 0) > 0
     else
@@ -129,7 +186,7 @@ Queue.deconstruct_finished_miners = function(data)
     if not script.active_mods['AutoDeconstruct'] then
         if data.logistic_cell.valid and data.logistic_cell.construction_radius > 0 and data.logistic_cell.logistic_network then
             local surface, force, position = get_entity_info(data.logistic_cell.owner)
-            local filter = {area = Position.expand_to_area(position, data.logistic_cell.construction_radius), type = data.find_type or 'error', force = force}
+            local filter = {area = expand_to_area(position, data.logistic_cell.construction_radius), type = data.find_type or 'error', force = force}
             for _, miner in pairs(surface.find_entities_filtered(filter)) do
                 if not miner.to_be_deconstructed(force) and miner.minable and not miner.has_flag('not-deconstructable') and not has_resources(miner) then
                     miner.order_deconstruction(force)
@@ -160,7 +217,7 @@ local function run_interface(interface)
         local logistic_network, logistic_cell = find_network_and_cell(interface)
         if logistic_network and logistic_network.available_construction_robots > logistic_network.all_construction_robots * (settings['global']['nanobots-free-bots-per'].value / 100) then
             local tick_spacing = settings['global']['nanobots-cell-queue-rate'].value
-            local parameters = get_parameters(behaviour.parameters)
+            local parameters = get_parameters(behaviour)
             --game.print(serpent.block(parameters, {comment=false, sparse=false}))
             -- If the closest roboport signal is present and > 0 then just run on the attached cell
             local just_cell = (parameters['nano-signal-closest-roboport'] or 0) > 0 and logistic_cell and {logistic_cell} or nil
@@ -230,9 +287,11 @@ local function build_roboport_interface(event)
                 --If we have ghosts either via blueprint or something killed them
                 if entity.name == 'entity-ghost' then
                     if entity.ghost_name == 'roboport-interface-cc' then
-                        _, cc = entity.revive()
+                        local _, revived_entity = entity.revive()
+                        cc = revived_entity or {}
                     elseif entity.ghost_name == 'roboport-interface-scanner' then
-                        _, ra = entity.revive()
+                        local _, revived_entity = entity.revive()
+                        ra = revived_entity or {}
                     end
                 elseif entity.name == 'roboport-interface-cc' then
                     cc = entity
@@ -248,6 +307,9 @@ local function build_roboport_interface(event)
         if not ra.valid then
             ra = interface.surface.create_entity {name = 'roboport-interface-scanner', position = pos, force = force}
         end
+
+        -- Avoid accessing missing components if creation/revival was blocked.
+        if not (cc and cc.valid and ra and ra.valid) then return end
 
         --roboports start with a buffer of energy. Lets take that away!
         interface.energy = 0

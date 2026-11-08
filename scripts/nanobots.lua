@@ -1,7 +1,916 @@
--- nanobots.lua
-local function get_ammo_radius(player, ammo)
-    -- Функция для вычисления радиуса аммуниции
-    return ammo.get_radius()
+-- Build the square BoundingBox directly, avoiding stdlib's Area lookup.
+local function expand_to_area(pos, radius)
+    radius = radius or 1
+    return {
+        left_top = {x = pos.x - radius, y = pos.y - radius},
+        right_bottom = {x = pos.x + radius, y = pos.y + radius}
+    }
+end
+
+-- scripts/nanobots.lua (UPDATED)
+-- Fixes:
+--  - Repair visuals use nano-projectile-repair (green repair effect)
+--  - Prevent "LuaEntity API call when LuaEntity was invalid" in ghost scan loop
+
+_G.DEBUG_NANO = 0 -- default OFF, global for module access
+
+-- v5.8.0: Cached debug flags (updated in update_settings)
+local debug_repair_enabled = false
+
+-- Aggregated logging
+local aggregated_messages = {}
+local AGGREGATE_SILENCE_THRESHOLD = 120 -- 2 sec (120 ticks)
+
+local function nlog(msg)
+    if _G.DEBUG_NANO >= 1 and debug_repair_enabled and game then
+        game.print("[NANO] " .. msg)
+    end
+end
+
+local function nlog_dbg(msg)
+    if _G.DEBUG_NANO >= 2 and debug_repair_enabled and game then
+        game.print("[NANO:DBG] " .. msg)
+    end
+end
+
+local function nlog_agg(category, name, count)
+    if _G.DEBUG_NANO < 2 or not debug_repair_enabled then return end
+    if not game then return end
+    
+    count = count or 1
+    local key = category .. "|" .. (name or "unknown")
+    local t = game.tick
+    local rec = aggregated_messages[key]
+    if rec then
+        rec.count = rec.count + count
+        rec.last_tick = t
+    else
+        aggregated_messages[key] = { count = count, last_tick = t }
+    end
+end
+
+local function flush_aggregated_messages()
+    if _G.DEBUG_NANO < 2 then return end
+    if not game then return end
+    local t = game.tick
+    local rm = {}
+    for key, rec in pairs(aggregated_messages) do
+        if t - rec.last_tick >= AGGREGATE_SILENCE_THRESHOLD then
+            local category, name = key:match("([^|]+)|(.+)")
+            if category and name then
+                game.print("[NANO:AGG] " .. category .. ": " .. name .. " x" .. rec.count)
+            end
+            rm[#rm + 1] = key
+        end
+    end
+    for _, key in ipairs(rm) do
+        aggregated_messages[key] = nil
+    end
+end
+
+local Event = require('__Nanobots3__/stdlib/event/event').set_protected_mode(true)
+local Area = require('__Nanobots3__/stdlib/area/area')
+local Position = require('__Nanobots3__/stdlib/area/position')
+local table = require('__Nanobots3__/stdlib/utils/table')
+local time = require('__Nanobots3__/stdlib/utils/defines/time')
+local Queue = require('scripts/hash_queue')
+
+-- v5.0 NEW: Безопасные модули
+local SafeEntity = require('scripts/safe_entity')
+local ModuleRequests = require('scripts/module_requests')
+
+-- v5.2 NEW: Система качества и визуализация
+local QualitySystem = require('scripts/quality_system')
+
+-- v5.5.0: Auto-Defense System
+local AutoDefense = require('scripts/auto_defense')
+
+-- Load at control.lua parse time, never inside an event callback.
+local AmmoSwitch = require('scripts/ammo_switch')
+
+-- v5.4.0: Централизованные константы
+local CONSTANTS = require('scripts/constants')
+
+local queue
+local cfg
+
+local max, floor = math.max, math.floor
+local lua_table_sort = _G.table.sort
+
+local config = require('config')
+local armormods = require('scripts/armor-mods')
+
+local bot_radius = config.BOT_RADIUS
+local queue_speed = config.QUEUE_SPEED_BONUS
+
+local function unique(tbl)
+    return table.keys(table.invert(tbl))
+end
+
+local inv_list = unique {
+    defines.inventory.character_trash,
+    defines.inventory.character_main,
+    defines.inventory.god_main,
+    defines.inventory.chest,
+    defines.inventory.character_vehicle,
+    defines.inventory.car_trunk,
+    defines.inventory.cargo_wagon
+}
+
+local moveable_types = { train = true, car = true, spidertron = true }
+local blockable_types = { ['straight-rail'] = false, ['curved-rail'] = false }
+
+local explosives = {
+    { name = 'cliff-explosives', count = 1 }, { name = 'explosives', count = 10 }, { name = 'explosive-rocket', count = 4 },
+    { name = 'explosive-cannon-shell', count = 4 }, { name = 'cluster-grenade', count = 2 }, { name = 'grenade', count = 14 },
+    { name = 'land-mine', count = 5 }, { name = 'artillery-shell', count = 1 }
+}
+
+-- Repair type groups + scan lists builder (4.7.0)
+local REPAIR_TYPE_GROUPS = {
+    defense = { "ammo-turret", "electric-turret", "fluid-turret", "artillery-turret", "wall", "gate", "radar", "land-mine" },
+    transport = { "car", "spider-vehicle", "locomotive", "cargo-wagon", "fluid-wagon", "artillery-wagon" },
+    power = {
+        "electric-pole", "accumulator", "solar-panel", "generator", "boiler",
+        "reactor", "heat-exchanger", "heat-pipe",
+        "offshore-pump", "pump", "pipe", "pipe-to-ground",
+        "power-switch", "electric-energy-interface"
+    },
+    production = { "assembling-machine", "furnace", "mining-drill", "inserter", "roboport", "lab", "beacon" },
+    other = {"container", "logistic-container", "storage-tank", 
+    "straight-rail", "curved-rail", "half-diagonal-rail",
+    "curved-rail-a", "curved-rail-b",
+    "elevated-straight-rail", "elevated-curved-rail", 
+    "elevated-curved-rail-a", "elevated-curved-rail-b",
+    "elevated-half-diagonal-rail",
+    "rail-ramp", "rail-support",
+    "rail-signal", "rail-chain-signal",
+    "train-stop",
+    "transport-belt", "underground-belt", "splitter", "loader", "loader-1x1",
+    "linked-belt", "lane-splitter"}
+}
+
+local function build_repair_scan_types()
+    if not cfg then return end
+    local normal = {}
+
+    local function add(group)
+        for _, t in ipairs(REPAIR_TYPE_GROUPS[group]) do
+            normal[#normal + 1] = t
+        end
+    end
+
+    if cfg.repair_cat_defense then add("defense") end
+    if cfg.repair_cat_transport then add("transport") end
+    if cfg.repair_cat_power then add("power") end
+    if cfg.repair_cat_production then add("production") end
+    if cfg.repair_cat_other then add("other") end
+
+    cfg.repair_scan_types_normal = normal
+
+    local combat = {}
+    local function addc(group)
+        for _, t in ipairs(REPAIR_TYPE_GROUPS[group]) do
+            combat[#combat + 1] = t
+        end
+    end
+    addc("defense")
+    addc("transport")
+    cfg.repair_scan_types_combat = combat
+end
+
+-- Settings
+local function update_settings()
+    local setting = settings['global']
+
+    local log_level_str = setting['nanobots-log-level'].value
+    if log_level_str == "off" then
+        _G.DEBUG_NANO = 0
+    elseif log_level_str == "standard" then
+        _G.DEBUG_NANO = 1
+    elseif log_level_str == "debug" then
+        _G.DEBUG_NANO = 2
+    else
+        _G.DEBUG_NANO = 0
+    end
+
+    local function gv(name, default)
+        local s = setting[name]
+        if not s then return default end
+        return s.value
+    end
+
+    cfg = {
+        poll_rate = gv('nanobots-nano-poll-rate', 60),
+        queue_rate = gv('nanobots-nano-queue-rate', 12),
+        queue_cycle = gv('nanobots-nano-queue-per-cycle', 100),
+        build_tiles = gv('nanobots-nano-build-tiles', true),
+        network_limits = gv('nanobots-network-limits', true),
+        nanobots_auto = gv('nanobots-nanobots-auto', true),
+        equipment_auto = gv('nanobots-equipment-auto', true),
+        afk_time = gv('nanobots-afk-time', 4) * time.second,
+        do_proxies = gv('nanobots-nano-fullfill-requests', true),
+        do_repair = gv('nanobots-nano-repair', true),
+
+        -- 4.7.0 repair settings
+        repair_threshold = tonumber(gv('nanobots-repair-start-threshold', "0.95")) or 0.95,
+        repair_max_sessions = gv('nanobots-repair-max-sessions', 15),
+        repair_hp_per_action = gv('nanobots-repair-hp-per-action', 20),
+        repair_requeue_delay = gv('nanobots-repair-requeue-delay', 20),
+        repair_throttle_ticks = gv('nanobots-repair-throttle-ticks', 60),
+
+        repair_combat_important_only = gv('nanobots-repair-combat-important-only', true),
+        repair_combat_enemy_radius = gv('nanobots-repair-combat-enemy-radius', 32),
+        repair_combat_recent_damage_ticks = (gv('nanobots-repair-combat-recent-damage-seconds', 10) or 0) * 60,
+
+        repair_cat_defense = gv('nanobots-repair-cat-defense', true),
+        repair_cat_transport = gv('nanobots-repair-cat-transport', true),
+        repair_cat_power = gv('nanobots-repair-cat-power', true),
+        repair_cat_production = gv('nanobots-repair-cat-production', true),
+        repair_cat_other = gv('nanobots-repair-cat-other', false)
+    }
+
+    build_repair_scan_types()
+
+    if _G.DEBUG_NANO >= 1 then
+        nlog("Log level: " .. log_level_str)
+    end
+    
+    -- v5.8.0: Cache debug flag
+    debug_repair_enabled = false
+    if settings and settings.global then
+        local dbg_setting = settings.global["nanobots-debug-repair-system"]
+        if dbg_setting and dbg_setting.value then
+            debug_repair_enabled = true
+        end
+    end
+end
+
+Event.register(defines.events.on_runtime_mod_setting_changed, update_settings)
+update_settings()
+
+-- Combat detection
+Event.register(defines.events.on_entity_damaged, function(e)
+    local ent = e.entity
+    if not (ent and ent.valid) then return end
+    if ent.type ~= "character" then return end
+    local player = ent.player
+    if not (player and player.valid) then return end
+
+    storage.players = storage.players or {}
+    storage.players[player.index] = storage.players[player.index] or {}
+    storage.players[player.index].last_damaged_tick = game.tick
+end)
+
+local function is_player_in_combat(player)
+    if not (player and player.valid and player.character and player.character.valid) then
+        return false
+    end
+    local pdata = storage.players and storage.players[player.index]
+    local last = pdata and pdata.last_damaged_tick or nil
+
+    if last and (cfg.repair_combat_recent_damage_ticks or 0) > 0 then
+        if (game.tick - last) <= cfg.repair_combat_recent_damage_ticks then
+            return true
+        end
+    end
+
+    local r = cfg.repair_combat_enemy_radius or 0
+    if r <= 0 then
+        return false
+    end
+
+    local c = player.character
+    local cnt = c.surface.count_entities_filtered { position = c.position, radius = r, force = { "enemy" }, limit = 1 }
+    return (cnt and cnt > 0) or false
+end
+
+-- Repair sessions + throttle
+local function get_session_bucket(player_index)
+    storage.repair_sessions = storage.repair_sessions or {}
+    local b = storage.repair_sessions[player_index]
+    if not b then
+        b = { count = 0, units = {} }
+        storage.repair_sessions[player_index] = b
+    end
+    return b
+end
+
+local function session_active(player_index, unit_number)
+    local b = storage.repair_sessions and storage.repair_sessions[player_index]
+    return b and b.units and b.units[unit_number] ~= nil
+end
+
+local function session_count(player_index)
+    local b = storage.repair_sessions and storage.repair_sessions[player_index]
+    return (b and b.count) or 0
+end
+
+local function can_start_new_session(player_index)
+    return session_count(player_index) < (cfg.repair_max_sessions or 15)
+end
+
+local function start_session(player_index, unit_number)
+    local b = get_session_bucket(player_index)
+    if not b.units[unit_number] then
+        b.units[unit_number] = { last_tick = game.tick }
+        b.count = (b.count or 0) + 1
+    else
+        b.units[unit_number].last_tick = game.tick
+    end
+end
+
+local function touch_session(player_index, unit_number)
+    local b = storage.repair_sessions and storage.repair_sessions[player_index]
+    if b and b.units and b.units[unit_number] then
+        b.units[unit_number].last_tick = game.tick
+    end
+end
+
+local function end_session(player_index, unit_number)
+    local b = storage.repair_sessions and storage.repair_sessions[player_index]
+    if b and b.units and b.units[unit_number] then
+        b.units[unit_number] = nil
+        b.count = math.max(0, (b.count or 1) - 1)
+    end
+end
+
+local function cleanup_sessions_all()
+    if not storage.repair_sessions then return end
+    local timeout = 60 * 15 -- 15 sec idle => drop
+    for _, b in pairs(storage.repair_sessions) do
+        if b and b.units then
+            for unit, rec in pairs(b.units) do
+                if not rec or (game.tick - (rec.last_tick or 0)) > timeout then
+                    b.units[unit] = nil
+                    b.count = math.max(0, (b.count or 1) - 1)
+                end
+            end
+        end
+    end
+end
+
+local function ensure_throttle()
+    storage.repair_last_scan_tick = storage.repair_last_scan_tick or {}
+end
+
+-- v5.8.0: Precomputed priority lookup table (O(1) instead of O(n))
+local REPAIR_PRIORITY_MAP = {}
+-- Defense: priority 10
+for _, t in ipairs({"wall", "gate", "ammo-turret", "electric-turret", "fluid-turret", "artillery-turret"}) do
+    REPAIR_PRIORITY_MAP[t] = 10
+end
+REPAIR_PRIORITY_MAP["radar"] = 20
+REPAIR_PRIORITY_MAP["land-mine"] = 30
+-- Transport: priority 40
+for _, t in ipairs({"car", "spider-vehicle", "locomotive", "cargo-wagon", "fluid-wagon", "artillery-wagon"}) do
+    REPAIR_PRIORITY_MAP[t] = 40
+end
+-- Power: priority 50
+for _, t in ipairs(REPAIR_TYPE_GROUPS.power) do
+    REPAIR_PRIORITY_MAP[t] = 50
+end
+-- Production: priority 60
+for _, t in ipairs(REPAIR_TYPE_GROUPS.production) do
+    REPAIR_PRIORITY_MAP[t] = 60
+end
+-- Other: priority 70
+for _, t in ipairs(REPAIR_TYPE_GROUPS.other) do
+    REPAIR_PRIORITY_MAP[t] = 70
+end
+
+local function get_repair_priority(entity)
+    return REPAIR_PRIORITY_MAP[entity.type] or 80
+end
+
+-- Physical player context (works while the player is in remote view).
+local PhysicalPlayer = require('scripts/physical_player')
+local get_physical_character = PhysicalPlayer.get_physical_character
+local get_physical_vehicle = PhysicalPlayer.get_physical_vehicle
+local get_physical_surface = PhysicalPlayer.get_physical_surface
+local get_physical_position = PhysicalPlayer.get_physical_position
+local is_remote_view = PhysicalPlayer.is_remote_view
+
+-- Item search
+local current_player
+local current_at_least_one
+
+local function find_item(simple_stack, _, player, at_least_one)
+    current_player = player
+    current_at_least_one = at_least_one
+
+    local function _find_item(inner_stack)
+        local player = current_player
+        local at_least_one = current_at_least_one
+
+        local item = inner_stack.name
+        local count = inner_stack.count
+        local quality = inner_stack.quality or "normal"
+        count = at_least_one and 1 or count
+
+        local prototype = prototypes.item[item]
+        if not prototype then return false end
+        if prototype.type == 'item-with-inventory' then return false end
+
+        local have = player.get_item_count({ name = item, quality = quality })
+        nlog_agg("Поиск предмета", item .. " (" .. quality .. ")")
+
+        if player.cheat_mode or have >= count then
+            return true
+        end
+
+        local vehicle = get_physical_vehicle(player)
+        local train = vehicle and vehicle.train
+        return vehicle and ((vehicle.get_item_count({ name = item, quality = quality }) >= count)
+            or (train and train.get_item_count({ name = item, quality = quality }) >= count))
+    end
+
+    return _find_item(simple_stack)
+end
+
+local function local_find_item(list, player, at_least_one)
+    for _, stack in pairs(list or {}) do
+        if find_item(stack, nil, player, at_least_one) then
+            return stack
+        end
+    end
+    return nil
+end
+
+local function is_connected_player_ready(player)
+    local character = get_physical_character(player)
+    if not character then return false end
+    -- Camera movement in remote view is not guaranteed to reset afk_time.
+    -- Do not suspend the physical character's nanobots while the player is remote.
+    return is_remote_view(player) or cfg.afk_time <= 0 or player.afk_time < cfg.afk_time
+end
+
+local function has_powered_equipment(character, eq_name)
+    local grid = character.grid
+    if grid then
+        local eq = grid.find(eq_name)
+        return eq and eq.energy > 0
+    end
+end
+
+local function nano_network_check(character, target)
+    if has_powered_equipment(character, 'equipment-bot-chip-nanointerface') then
+        return true
+    else
+        local c = character
+        local networks = target and target.valid
+            and target.surface.find_logistic_networks_by_construction_area(target.position, target.force)
+            or c.surface.find_logistic_networks_by_construction_area(c.position, c.force)
+
+        local pnetwork = c.logistic_cell and c.logistic_cell.mobile and c.logistic_cell.logistic_network
+        
+        -- v5.7.0: Check if personal roboport is ENABLED
+        -- allow_dispatching_robots = false when player toggles roboport off (ALT+F or shortcut bar)
+        local has_pbots = false
+        if c.logistic_cell and c.logistic_cell.mobile then
+            local cell = c.logistic_cell
+            -- Check if roboport is enabled via character property
+            local roboport_enabled = c.allow_dispatching_robots
+            
+            if roboport_enabled then
+                -- Roboport is enabled, check for robots
+                if cell.stationed_construction_robot_count and cell.stationed_construction_robot_count > 0 then
+                    has_pbots = true
+                elseif cell.logistic_network and cell.logistic_network.all_construction_robots > 0 then
+                    has_pbots = true
+                end
+            end
+            -- If roboport is disabled (allow_dispatching_robots = false), has_pbots stays false = nanobots can work
+        end
+
+        local has_nbots = table.any(networks or {}, function(network)
+            return network ~= pnetwork and network.all_construction_robots > 0
+        end)
+        return not (has_pbots or has_nbots)
+    end
+end
+
+local function nano_repairable_entity(entity)
+    if not SafeEntity.is_valid(entity) then return false end
+    
+    -- v5.1: Безопасные проверки через SafeEntity
+    if SafeEntity.has_flag(entity, 'not-repairable') then return false end
+    
+    local entity_type = SafeEntity.get_type(entity)
+    if entity_type:find('robot') then return false end
+    
+    -- Проверка blockable_types
+    if blockable_types[entity_type] then
+        local is_minable = SafeEntity.get_property(entity, "minable")
+        if is_minable == false then return false end
+    end
+    
+    -- Проверка здоровья
+    if SafeEntity.get_health_ratio(entity, 1) >= 1 then return false end
+    
+    -- Проверка движения
+    if moveable_types[entity_type] then
+        local speed = SafeEntity.get_property(entity, "speed", 0)
+        if speed > 0 then return false end
+    end
+    
+    -- Безопасная проверка collision_mask
+    local proto = SafeEntity.get_prototype(entity)
+    if proto and proto.collision_mask then
+        return table_size(proto.collision_mask) > 0
+    end
+    
+    return false
+end
+
+local function get_gun_ammo_name(player, gun_name)
+    if not (player and player.valid and player.character and player.character.valid) then
+        return nil, nil, nil
+    end
+    local gun_inv = player.character.get_inventory(defines.inventory.character_guns)
+    local ammo_inv = player.character.get_inventory(defines.inventory.character_ammo)
+    if not (gun_inv and ammo_inv) then return nil, nil, nil end
+
+    local gun, ammo
+    if not player.mod_settings['nanobots-active-emitter-mode'].value then
+        local index
+        gun, index = gun_inv.find_item_stack(gun_name)
+        ammo = gun and ammo_inv[index]
+    else
+        local index = player.character.selected_gun_index
+        gun, ammo = gun_inv[index], ammo_inv[index]
+    end
+
+    if gun and gun.valid_for_read and ammo and ammo.valid_for_read then
+        return gun, ammo, ammo.name
+    end
+    return nil, nil, nil
+end
+
+-- insert/spill helpers
+local function insert_or_spill_items(entity, item_stacks, is_return_cheat)
+    if is_return_cheat then return end
+    if not (entity and entity.valid) then return end
+
+    local new_stacks = {}
+    if item_stacks then
+        if item_stacks[1] and item_stacks[1].name then
+            new_stacks = item_stacks
+        elseif item_stacks and item_stacks.name then
+            new_stacks = { item_stacks }
+        end
+
+        for _, stack in pairs(new_stacks) do
+            local name, count, health = stack.name, stack.count, stack.health or 1
+            if prototypes.item[name] and not prototypes.item[name].hidden then
+                local inserted = entity.insert({ name = name, count = count, health = health, quality = stack.quality })
+                if inserted ~= count then
+                    local spill_surface, spill_position = entity.surface, entity.position
+                    local ok_player, is_player = pcall(function() return entity.is_player() end)
+                    if ok_player and is_player then
+                        spill_surface = get_physical_surface(entity) or spill_surface
+                        spill_position = get_physical_position(entity) or spill_position
+                    end
+                    if spill_surface and spill_surface.valid and spill_position then
+                        spill_surface.spill_item_stack {
+                            position = spill_position,
+                            stack = { name = name, count = count - inserted, health = health, quality = stack.quality },
+                            enable_looted = true
+                        }
+                    end
+                end
+            end
+        end
+        return new_stacks[1] and new_stacks[1].name and true
+    end
+end
+
+local function insert_into_entity(entity, item_stacks)
+    if not (entity and entity.valid) then return {} end
+    item_stacks = item_stacks or {}
+    if item_stacks and item_stacks.name then
+        item_stacks = { item_stacks }
+    end
+    local new_stacks = {}
+    for _, stack in pairs(item_stacks) do
+        local name, count, health = stack.name, stack.count, stack.health or 1
+        local inserted = entity.insert(stack)
+        if inserted ~= count then
+            new_stacks[#new_stacks + 1] = { name = name, count = count - inserted, health = health }
+        end
+    end
+    return new_stacks
+end
+
+local function get_all_items_on_ground(entity, existing_stacks)
+    if not SafeEntity.is_valid(entity) then return existing_stacks or {} end
+    local item_stacks = existing_stacks or {}
+    
+    -- v5.1: Безопасное получение всех свойств через SafeEntity
+    local surface = SafeEntity.get_surface(entity)
+    local position = SafeEntity.get_position(entity, {x=0, y=0})
+    
+    -- Безопасное получение ghost_prototype
+    local ghost_proto = SafeEntity.get_property(entity, "ghost_prototype")
+    local bounding_box = (ghost_proto and ghost_proto.selection_box) or {{-1,-1},{1,1}}
+    
+    if not surface then return item_stacks end
+    
+    local area = Area.offset(bounding_box, position)
+
+    -- Безопасный поиск предметов на земле
+    local success, items = pcall(function()
+        return surface.find_entities_filtered { name = 'item-on-ground', area = area }
+    end)
+    
+    if success and items then
+        for _, item_on_ground in pairs(items) do
+            if item_on_ground.valid then
+                pcall(function()
+                    item_stacks[#item_stacks + 1] = {
+                        name = item_on_ground.stack.name,
+                        count = item_on_ground.stack.count,
+                        health = item_on_ground.health or 1
+                    }
+                    item_on_ground.destroy()
+                end)
+            end
+        end
+    end
+
+    -- Безопасный поиск предметов в манипуляторах
+    local inserter_area = Area.expand(area, 3)
+    success, items = pcall(function()
+        return surface.find_entities_filtered { area = inserter_area, type = 'inserter' }
+    end)
+    
+    if success and items then
+        for _, inserter in pairs(items) do
+            if inserter.valid then
+                pcall(function()
+                    local stack = inserter.held_stack
+                    if stack.valid_for_read and Position.inside(inserter.held_stack_position, area) then
+                        item_stacks[#item_stacks + 1] = { 
+                            name = stack.name, 
+                            count = stack.count, 
+                            health = stack.health or 1 
+                        }
+                        stack.clear()
+                    end
+                end)
+            end
+        end
+    end
+
+    return (item_stacks[1] and item_stacks) or {}
+end
+
+local function get_items_from_inv(entity, item_stack, cheat, at_least_one)
+    if cheat then
+        return { name = item_stack.name, count = item_stack.count, health = 1, quality = item_stack.quality }
+    end
+
+    local sources = {}
+    local vehicle = get_physical_vehicle(entity)
+    local character = get_physical_character(entity)
+    if vehicle and vehicle.train then
+        local cargo_wagons = vehicle.train.cargo_wagons or {}
+        for _, wagon in pairs(cargo_wagons) do
+            sources[#sources + 1] = wagon
+        end
+        if character then sources[#sources + 1] = character end
+    elseif vehicle then
+        sources[#sources + 1] = vehicle
+        if character then sources[#sources + 1] = character end
+    elseif character then
+        sources[#sources + 1] = character
+    end
+
+    local new_item_stack = { name = item_stack.name, count = 0, health = 1, quality = item_stack.quality }
+    local count = item_stack.count
+    local required_quality = item_stack.quality or "normal"
+
+    for _, source in pairs(sources) do
+        if source and source.valid then
+            for _, inv in pairs(inv_list) do
+                local inventory = source.get_inventory(inv)
+                if inventory and inventory.valid then
+                    -- Проверяем наличие предмета с нужным качеством
+                    local item_count = inventory.get_item_count({ name = item_stack.name, quality = required_quality })
+                    if item_count > 0 then
+                        -- v5.8.0: Manual iteration but without pcall overhead
+                        for i = 1, #inventory do
+                            local stack = inventory[i]
+                            if stack.valid_for_read and stack.name == item_stack.name then
+                                local stack_quality = "normal"
+                                if stack.quality and stack.quality.name then
+                                    stack_quality = stack.quality.name
+                                end
+                                
+                                if stack_quality == required_quality then
+                                    local removed = math.min(stack.count, count)
+                                    new_item_stack.count = new_item_stack.count + removed
+                                    new_item_stack.health = new_item_stack.health * stack.health
+                                    stack.count = stack.count - removed
+                                    count = count - removed
+                                    if new_item_stack.count == item_stack.count then
+                                        return new_item_stack
+                                    end
+                                    if count <= 0 then
+                                        break
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if entity.is_player() then
+        local stack = entity.cursor_stack
+        if stack and stack.valid_for_read and stack.name == item_stack.name then
+            -- v5.8.0: Прямой доступ к quality без pcall
+            local cursor_quality = "normal"
+            if stack.quality and stack.quality.name then
+                cursor_quality = stack.quality.name
+            end
+            
+            if cursor_quality == required_quality then
+                local removed = math.min(stack.count, count)
+                new_item_stack.count = new_item_stack.count + removed
+                new_item_stack.health = new_item_stack.health * stack.health
+                stack.count = stack.count - removed
+            end
+        end
+    end
+
+    if new_item_stack.count == item_stack.count then
+        return new_item_stack
+    elseif new_item_stack.count > 0 and at_least_one then
+        return new_item_stack
+    else
+        return nil
+    end
+end
+
+-- ammo drain
+local function ammo_drain(player, ammo, amount)
+    if not (player and player.valid) then return false end
+    if player.cheat_mode then return true end
+    if not (ammo and ammo.valid_for_read) then return false end
+
+    amount = amount or 1
+    
+    -- v5.8.0: Прямой доступ без pcall
+    local name = ammo.name
+    if not name then return false end
+    
+    ammo.drain_ammo(amount)
+
+    if not ammo.valid_for_read then
+        local character = get_physical_character(player)
+        local inv = character and character.get_main_inventory()
+        if inv and inv.valid then
+            local new = inv.find_item_stack(name)
+            if new then
+                ammo.set_stack(new)
+                new.clear()
+            end
+        end
+    end
+    return true
+end
+
+local function get_ammo_radius(player, nano_ammo)
+    if not (player and player.valid) then return 7 end
+    storage.players = storage.players or {}
+    local data = storage.players[player.index] or {}
+    data.ranges = data.ranges or {}
+    storage.players[player.index] = data
+
+    -- v5.8.0: Прямой доступ к ammo_category без pcall
+    local modifier = 0
+    if nano_ammo and nano_ammo.prototype and nano_ammo.prototype.ammo_category then
+        modifier = player.force.get_ammo_damage_modifier(nano_ammo.prototype.ammo_category.name) or 0
+    end
+    
+    local base_radius = bot_radius[modifier] or 7
+    
+    -- v5.2: Применяем бонус качества к радиусу
+    local _, quality_multiplier = QualitySystem.get_ammo_quality(player, nano_ammo)
+    local max_radius = QualitySystem.apply_quality_to_radius(base_radius, quality_multiplier)
+    
+    -- v5.8.0: Прямой доступ к имени ammo
+    local ammo_name = nano_ammo and nano_ammo.valid_for_read and nano_ammo.name or nil
+    
+    local custom_radius = ammo_name and data.ranges[ammo_name]
+    if type(custom_radius) ~= 'number' then
+        custom_radius = max_radius
+    end
+    return custom_radius <= max_radius and custom_radius or max_radius
+end
+
+-- Each constructor magazine already costs one repair pack (300 HP / 10 charges).
+-- A consumed nano charge therefore includes 30 HP of repair capacity. Unused
+-- repair capacity follows the player, so the HP-per-step setting can stay at 20
+-- without wasting 10 HP of every 30-HP charge.
+local REPAIR_HP_PER_NANO_CHARGE = 30
+
+local function repair_credit_data(player_index)
+    storage.players = storage.players or {}
+    local pdata = storage.players[player_index]
+    if not pdata then
+        pdata = {}
+        storage.players[player_index] = pdata
+    end
+    return pdata
+end
+
+-- Consume a charge only if the previous charge's repair budget is exhausted.
+-- Health is never restored for free, and loose repair packs are not needed.
+local function repair_with_nano_charge(player, entity, damage, current_health, max_health)
+    local pdata = repair_credit_data(player.index)
+    local budget = math.max(0, pdata.nano_repair_hp_credit or 0)
+    local spent_charge = false
+
+    if budget < 1 then
+        local _, nano_ammo, ammo_name = get_gun_ammo_name(player, 'gun-nano-emitter')
+        if ammo_name ~= 'ammo-nano-constructors' or not nano_ammo or nano_ammo.ammo < 1 then
+            return 0, false
+        end
+        if not ammo_drain(player, nano_ammo, 1) then
+            return 0, false
+        end
+        budget = REPAIR_HP_PER_NANO_CHARGE
+        spent_charge = true
+    end
+
+    local per_action = (cfg and cfg.repair_hp_per_action) or 20
+    local requested = math.min(damage, math.max(1, per_action), budget)
+    if requested <= 0 then
+        pdata.nano_repair_hp_credit = budget
+        return 0, spent_charge
+    end
+
+    local ok, actual = pcall(function()
+        entity.health = math.min(max_health, current_health + requested)
+        return math.max(0, math.min(requested, (entity.health or current_health) - current_health))
+    end)
+    if not ok then
+        -- Keep any paid-but-unused repair capacity if another mod rejects the write.
+        pdata.nano_repair_hp_credit = budget
+        return 0, spent_charge
+    end
+
+    pdata.nano_repair_hp_credit = budget - actual
+    return actual, spent_charge
+end
+
+-- pending repairs
+local function push_pending_repair(data, run_tick)
+    storage.nano_repair_pending = storage.nano_repair_pending or {}
+    storage.nano_repair_pending[#storage.nano_repair_pending + 1] = {
+        data = data,
+        tick = run_tick
+    }
+end
+
+local function process_pending_repairs()
+    local pending = storage.nano_repair_pending
+    if not pending or #pending == 0 then return end
+    storage.nano_repair_pending = {}
+
+    for _, rec in ipairs(pending) do
+        local data = rec.data
+        local tick = rec.tick
+
+        local entity = data and data.entity
+        if not (entity and entity.valid) then
+            if data and data.player_index and data.unit_number then
+                end_session(data.player_index, data.unit_number)
+            end
+            goto continue
+        end
+
+        if not queue then goto continue end
+        if queue:get_hash(entity) then goto continue end
+
+        -- Legacy pending repairs may contain need_ammo, but all charging is now
+        -- performed in Queue.repair after the target and range are validated.
+        data.nano_repair_charge_mode = 2
+        if tick <= game.tick then tick = game.tick + 1 end
+
+        queue:insert(data, tick)
+        ::continue::
+    end
+end
+
+-- v5.0 NEW: Используем новый модуль ModuleRequests вместо старой функции
+-- Старая функция satisfy_requests_impl удалена - теперь используется безопасный модуль
+local function satisfy_requests(requests, entity, player)
+    return ModuleRequests.satisfy_requests(requests, entity, player)
 end
 
 local function create_projectile(name, surface, force, source, target, speed)
@@ -12,86 +921,89 @@ local function create_projectile(name, surface, force, source, target, speed)
     end
 end
 
-local function nano_network_check(character, entity)
-    -- Проверка на соединение с сетью нано-ботов
-    return true
-end
-
-local function use_repair_tool(player, damage)
-    -- Использование инструмента для ремонта
-    return damage, false
-end
-
-local function has_repair_tool(player)
-    -- Проверка, есть ли инструмент для ремонта
-    return true
-end
-
-local function nlog_agg(message, type)
-    -- Логирование сообщений
-    game.print(message)
-end
-
--- Основной объект очереди
-local Queue = {}
-
-function Queue.insert(data, tick)
-    -- Добавление действия в очередь
-    if not storage.nano_queue then
-        storage.nano_queue = {}
+-- Queue actions (same as before) + Repair uses nano-projectile-repair
+function Queue.cliff_deconstruction(data)
+    local entity, player = data.entity, game.get_player(data.player_index)
+    if not (player and player.valid) then return end
+    if not (player.character and player.character.valid) then
+        insert_or_spill_items(player, { data.item_stack })
+        return
     end
-    table.insert(storage.nano_queue, data)
+    
+    -- v5.1: Безопасная проверка entity
+    if not SafeEntity.is_valid(entity) then
+        insert_or_spill_items(player, { data.item_stack })
+        return
+    end
+    
+    local should_deconstruct = entity.to_be_deconstructed()
+
+    if not should_deconstruct then
+        insert_or_spill_items(player, { data.item_stack })
+        return
+    end
+
+    -- v5.1: Безопасное получение свойств для projectile
+    local entity_surface = SafeEntity.get_surface(entity)
+    local entity_force = SafeEntity.get_property(entity, "force")
+    local entity_pos = SafeEntity.get_position(entity)
+    local player_pos = SafeEntity.get_position(player.character)
+    
+    if entity_surface and entity_pos and player_pos then
+        create_projectile('nano-projectile-deconstructors', entity_surface, entity_force, player_pos, entity_pos)
+        
+        local exp_name = data.item_stack.name == 'artillery-shell' and 'big-artillery-explosion' or 'big-explosion'
+        pcall(function()
+            entity_surface.create_entity { name = exp_name, position = entity_pos }
+        end)
+    end
+    
+    SafeEntity.destroy(entity, { do_cliff_correction = true, raise_destroy = true })
+    nlog_agg("Снесено скал", "cliff")
+    return not entity.valid
 end
 
-function Queue.execute(event)
-    -- Исполнение действий из очереди
-    for _, data in ipairs(storage.nano_queue) do
-        if data.action == 'repair' then
-            Queue.repair(data)
-        elseif data.action == 'deconstruction' then
-            Queue.deconstruction(data)
-        elseif data.action == 'build_entity_ghost' then
-            Queue.build_entity_ghost(data)
-        elseif data.action == 'build_tile_ghost' then
-            Queue.build_tile_ghost(data)
-        elseif data.action == 'upgrade_direction' then
-            Queue.upgrade_direction(data)
-        elseif data.action == 'upgrade_ghost' then
-            Queue.upgrade_ghost(data)
-        elseif data.action == 'item_requests' then
-            Queue.item_requests(data)
-        end
-    end
+local function report_work_blocker(player, message)
+    if not settings.get_player_settings(player)['nanobots-show-status'].value then return end
+    storage.work_blockers = storage.work_blockers or {}
+    storage.work_blockers[player.index] = {message = message, tick = game.tick}
 end
 
 function Queue.deconstruction(data)
     local entity = data.entity
     local player = game.get_player(data.player_index)
-    if not (player and player.valid) then return end
-    if not (player.character and player.character.valid) then return end
-    if not (entity and entity.valid and entity.to_be_deconstructed()) then return end
+    local character = get_physical_character(player)
+    if not character or not SafeEntity.is_valid(entity) then return end
+    if entity.surface ~= character.surface or not entity.to_be_deconstructed() then return end
+
+    local ammo = data.ammo
+    if not (ammo and ammo.valid and ammo.valid_for_read and ammo.name == 'ammo-nano-constructors') then return end
 
     local entity_name = entity.name
-    local surface = data.surface or entity.surface
-    local force = entity.force
-    local ppos = player.character.position
-    local epos = entity.position
-
-    create_projectile('nano-projectile-deconstructors', surface, force, ppos, epos)
-    create_projectile('nano-projectile-return', surface, force, epos, ppos)
+    local surface, force, position = entity.surface, entity.force, entity.position
+    local origin = character.position
+    local miner = is_remote_view(player) and character or player
 
     if entity_name == 'deconstructible-tile-proxy' then
-        local tile = surface.get_tile(epos)
-        if tile then
-            local tile_name = tile.name
-            player.mine_tile(tile)
-            if entity.valid then entity.destroy() end
-            nlog_agg("Снесено плиток", tile_name)
-        end
+        local tile = surface.get_tile(position)
+        local tile_name = tile.name
+        if not miner.mine_tile(tile) then return end
+        if entity.valid then SafeEntity.destroy(entity) end
+        nlog_agg("Снесено плиток", tile_name)
     else
-        player.mine_entity(entity)
+        if not miner.mine_entity(entity) then
+            local inventory = character.get_main_inventory()
+            if inventory and inventory.is_full() then
+                report_work_blocker(player, {'nanobots-work-status.inventory-full'})
+            end
+            return
+        end
         nlog_agg("Снесено", entity_name)
     end
+
+    ammo_drain(player, ammo, 1)
+    create_projectile('nano-projectile-deconstructors', surface, force, origin, position)
+    create_projectile('nano-projectile-return', surface, force, position, origin)
 end
 
 function Queue.build_entity_ghost(data)
@@ -102,41 +1014,83 @@ function Queue.build_entity_ghost(data)
 
     if not (player and player.valid) then return end
     if not (player.character and player.character.valid) then
-        return insert_or_spill_items(player, { data.item_stack })
+        insert_or_spill_items(player, { data.item_stack }, player.cheat_mode)
+        return
     end
-    if not (ghost and ghost.valid and ghost.ghost_name == data.entity_name) then
-        return insert_or_spill_items(player, { data.item_stack })
+    
+    -- v5.0: Проверка ghost через SafeEntity
+    if not SafeEntity.is_valid(ghost) then
+        insert_or_spill_items(player, { data.item_stack }, player.cheat_mode)
+        return
     end
-
-    local item_stacks = get_all_items_on_ground(ghost)
-    if not player.surface.can_place_entity { name = ghost.ghost_name, position = ghost.position, direction = ghost.direction, force = ghost.force } then
-        return insert_or_spill_items(player, { data.item_stack })
-    end
-
-    local revived, entity, requests = ghost.revive { return_item_request_proxy = true, raise_revive = true }
-    if not revived then
-        return insert_or_spill_items(player, { data.item_stack })
-    end
-
-    if not entity then
-        if insert_or_spill_items(player, item_stacks, player.cheat_mode) then
-            create_projectile('nano-projectile-return', surface, player.force, position, player.character.position)
-        end
+    
+    local ghost_name = SafeEntity.get_property(ghost, "ghost_name")
+    if ghost_name ~= data.entity_name then
+        insert_or_spill_items(player, { data.item_stack }, player.cheat_mode)
         return
     end
 
-    create_projectile('nano-projectile-constructors', entity.surface, entity.force, player.character.position, entity.position)
-    entity.health = (entity.health > 0) and ((data.item_stack.health or 1) * entity.max_health)
+    
+    -- v5.0: Безопасное получение свойств для can_place_entity
+    local ghost_pos = SafeEntity.get_position(ghost)
+    local ghost_dir = SafeEntity.get_property(ghost, "direction")
+    local ghost_force = SafeEntity.get_property(ghost, "force")
+    
+    local item_stacks = get_all_items_on_ground(ghost)
+    if not player.character.surface.can_place_entity { 
+        name = ghost_name, 
+        position = ghost_pos, 
+        direction = ghost_dir, 
+        force = ghost_force 
+    } then
+        insert_or_spill_items(player, item_stacks)
+        insert_or_spill_items(player, { data.item_stack }, player.cheat_mode)
+        return
+    end
+
+    -- v5.0: Безопасный revive
+    local revived, entity, requests = SafeEntity.revive(ghost, { raise_revive = true })
+    if not revived then
+        insert_or_spill_items(player, item_stacks)
+        insert_or_spill_items(player, { data.item_stack }, player.cheat_mode)
+        return
+    end
+
+    if not SafeEntity.is_valid(entity) then
+        if insert_or_spill_items(player, item_stacks, player.cheat_mode) then
+            create_projectile('nano-projectile-return', surface, player.force, position, (get_physical_position(player) or player.character.position))
+        end
+        return true
+    end
+
+    -- v5.0: Безопасное создание projectile и установка health
+    local entity_surface = SafeEntity.get_surface(entity)
+    local entity_force = SafeEntity.get_property(entity, "force")
+    local entity_pos = SafeEntity.get_position(entity)
+    
+    if entity_surface then
+        create_projectile('nano-projectile-constructors', entity_surface, entity_force, (get_physical_position(player) or player.character.position), entity_pos)
+    end
+    
+    -- Безопасная установка здоровья
+    pcall(function()
+        local current_health = entity.health
+        local max_health = entity.max_health
+        if current_health and max_health and current_health > 0 then
+            entity.health = (data.item_stack.health or 1) * max_health
+        end
+    end)
 
     if insert_or_spill_items(player, insert_into_entity(entity, item_stacks)) then
-        create_projectile('nano-projectile-return', surface, player.force, position, player.character.position)
+        create_projectile('nano-projectile-return', surface, player.force, position, (get_physical_position(player) or player.character.position))
     end
 
     nlog_agg("Построено", data.entity_name)
 
-    if requests and requests.valid and entity and entity.valid then
+    if requests and requests.valid and SafeEntity.is_valid(entity) then
         satisfy_requests(requests, entity, player)
     end
+    return true
 end
 
 function Queue.build_tile_ghost(data)
@@ -147,33 +1101,52 @@ function Queue.build_tile_ghost(data)
 
     if not (player and player.valid) then return end
     if not (player.character and player.character.valid) then
-        return insert_or_spill_items(player, { data.item_stack })
+        insert_or_spill_items(player, { data.item_stack })
+        return
     end
-    if not (ghost and ghost.valid) then
-        return insert_or_spill_items(player, { data.item_stack })
+    if not SafeEntity.is_valid(ghost) then
+        insert_or_spill_items(player, { data.item_stack })
+        return
     end
 
     local tile, hidden_tile = surface.get_tile(position), surface.get_hidden_tile(position)
-    local force = ghost.force
-    local tile_was_mined = hidden_tile and tile.prototype.can_be_part_of_blueprint and player.mine_tile(tile)
-    local ghost_was_revived = ghost.valid and ghost.revive({ raise_revive = true })
+    
+    -- v5.1: Безопасное получение force
+    local force = SafeEntity.get_property(ghost, "force")
+    
+    local tile_was_mined = hidden_tile and tile.prototype.can_be_part_of_blueprint and (is_remote_view(player) and player.character or player).mine_tile(tile)
+    local ghost_was_revived = SafeEntity.is_valid(ghost) and SafeEntity.revive(ghost, { raise_revive = true })
+    
     if not (tile_was_mined or ghost_was_revived) then
-        return insert_or_spill_items(player, { data.item_stack })
+        insert_or_spill_items(player, { data.item_stack })
+        return
     end
 
     local item_ptype = data.item_stack and prototypes.item[data.item_stack.name]
-    local tile_ptype = item_ptype and item_ptype.place_as_tile_result.result
-    create_projectile('nano-projectile-constructors', surface, force, player.character.position, position)
+    local tile_ptype = item_ptype and item_ptype.place_as_tile_result and item_ptype.place_as_tile_result.result
+    
+    local player_pos = SafeEntity.get_position(player.character)
+    if player_pos then
+        create_projectile('nano-projectile-constructors', surface, force, player_pos, position)
+    end
 
     Position.floored(position)
-    if tile_was_mined and not ghost_was_revived then
-        create_projectile('nano-projectile-return', surface, force, position, player.character.position)
-        surface.set_tiles({ { name = tile_ptype.name, position = position } }, true, true, false, true)
+    if tile_was_mined and not ghost_was_revived and tile_ptype then
+        if player_pos then
+            create_projectile('nano-projectile-return', surface, force, position, player_pos)
+        end
+        pcall(function()
+            surface.set_tiles({ { name = tile_ptype.name, position = position } }, true, true, false, true)
+        end)
     end
-    surface.play_sound { path = 'nano-sound-build-tiles', position = position }
+    
+    pcall(function()
+        surface.play_sound { path = 'nano-sound-build-tiles', position = position }
+    end)
 
     local tile_name = tile_ptype and tile_ptype.name or (data.item_stack and data.item_stack.name) or "unknown"
     nlog_agg("Уложено плиток", tile_name)
+    return true
 end
 
 function Queue.upgrade_direction(data)
@@ -182,13 +1155,33 @@ function Queue.upgrade_direction(data)
     local surface = data.surface
     if not (player and player.valid) then return end
     if not (player.character and player.character.valid) then return end
-    if not (ghost and ghost.valid and ghost.to_be_upgraded()) then return end
+    
+    -- v5.1: Безопасная проверка ghost
+    if not SafeEntity.is_valid(ghost) then return end
+    
+    local should_upgrade = ghost.to_be_upgraded()
+    if not should_upgrade then return end
 
-    ghost.direction = data.direction
-    ghost.cancel_upgrade(player.force, player)
-    create_projectile('nano-projectile-constructors', ghost.surface, ghost.force, player.character.position, ghost.position)
-    surface.play_sound { path = 'utility/build_small', position = ghost.position }
-    nlog_agg("Повернуто", ghost.name)
+    -- v5.1: Безопасное изменение направления
+    pcall(function()
+        ghost.direction = data.direction
+        ghost.cancel_upgrade(player.force, player)
+    end)
+    
+    local ghost_surface = SafeEntity.get_surface(ghost)
+    local ghost_force = SafeEntity.get_property(ghost, "force")
+    local ghost_pos = SafeEntity.get_position(ghost)
+    local ghost_name = SafeEntity.get_name(ghost, "unknown")
+    local player_pos = SafeEntity.get_position(player.character)
+    
+    if ghost_surface and ghost_pos and player_pos then
+        create_projectile('nano-projectile-constructors', ghost_surface, ghost_force, player_pos, ghost_pos)
+        pcall(function()
+            surface.play_sound { path = 'utility/build_small', position = ghost_pos }
+        end)
+    end
+    
+    nlog_agg("Повернуто", ghost_name)
 end
 
 function Queue.upgrade_ghost(data)
@@ -199,57 +1192,92 @@ function Queue.upgrade_ghost(data)
 
     if not (player and player.valid) then return end
     if not (player.character and player.character.valid) then
-        return insert_or_spill_items(player, { data.item_stack })
+        insert_or_spill_items(player, { data.item_stack })
+        return
     end
     if not (ghost and ghost.valid) then
-        return insert_or_spill_items(player, { data.item_stack })
+        insert_or_spill_items(player, { data.item_stack })
+        return
     end
 
     local old_name = ghost.name
     local new_name = data.entity_name or data.item_stack.name
 
+    local target, quality = ghost.get_upgrade_target()
+    if not target or target.name ~= new_name then
+        insert_or_spill_items(player, data.item_stack, player.cheat_mode)
+        return
+    end
+
     local entity = surface.create_entity {
         name = new_name,
+        quality = quality,
         direction = ghost.direction,
         force = ghost.force,
         position = position,
         fast_replace = true,
-        player = player,
+        -- Use only the physical character: player takes precedence in remote view.
+        character = get_physical_character(player),
         type = ghost.type == 'underground-belt' and ghost.belt_to_ground_type or nil,
         raise_built = true
     }
     if not entity then
-        return insert_or_spill_items(player, { data.item_stack })
+        insert_or_spill_items(player, { data.item_stack })
+        return
     end
 
-    create_projectile('nano-projectile-constructors', entity.surface, entity.force, player.character.position, entity.position)
+    entity.last_user = player
+    create_projectile('nano-projectile-constructors', entity.surface, entity.force, (get_physical_position(player) or player.character.position), entity.position)
     surface.play_sound { path = 'utility/build_small', position = entity.position }
     entity.health = (entity.health > 0) and ((data.item_stack.health or 1) * entity.max_health)
 
     nlog_agg("Апгрейд " .. old_name .. " →", new_name)
+    return true
 end
 
 function Queue.item_requests(data)
     local proxy = data.entity
-    local player = game
     local player = game.get_player(data.player_index)
     if not player or not player.valid then return end
     if not player.character or not player.character.valid then return end
-    if not proxy or not proxy.valid then return end
+    if not SafeEntity.is_valid(proxy) then return end
 
-    local target = proxy.proxy_target
-    local target_name = target and target.valid and target.name or "unknown"
-    if not target or not target.valid then return end
-
-    nlog("🎯 Обработка запроса модулей для: " .. target_name)
+    -- v5.1: Безопасное получение proxy_target
+    local target = nil
+    pcall(function()
+        target = proxy.proxy_target
+    end)
+    
+    if not SafeEntity.is_valid(target) then return end
+    
+    local target_name = SafeEntity.get_name(target, "unknown")
+    
+    -- v5.4.4: Определяем тип запроса для корректного логирования
+    local request_type = "модулей"
+    if SafeEntity.has_burner(target) then
+        request_type = "топлива"
+    elseif SafeEntity.has_ammo_inventory(target) then
+        request_type = "боеприпасов"
+    end
+    
+    nlog("🎯 Обработка запроса " .. request_type .. " для: " .. target_name)
 
     local ok = satisfy_requests(proxy, target, player)
     if ok and player.character and player.character.valid then
-        create_projectile('nano-projectile-constructors', proxy.surface, proxy.force, player.character.position, proxy.position)
+        -- v5.1: Безопасное создание projectile
+        local proxy_surface = SafeEntity.get_surface(proxy)
+        local proxy_force = SafeEntity.get_property(proxy, "force")
+        local proxy_pos = SafeEntity.get_position(proxy)
+        local player_pos = SafeEntity.get_position(player.character)
+        
+        if proxy_surface and proxy_pos and player_pos then
+            create_projectile('nano-projectile-constructors', proxy_surface, proxy_force, player_pos, proxy_pos)
+        end
     end
+    return ok
 end
 
--- Repair action (UPDATED projectile name)
+-- Repair with built-in nanobot repair charges (no loose repair pack)
 function Queue.repair(data)
     local entity = data.entity
     local player = game.get_player(data.player_index)
@@ -262,7 +1290,7 @@ function Queue.repair(data)
         if data and data.player_index and data.unit_number then end_session(data.player_index, data.unit_number) end
         return
     end
-    if not (entity and entity.valid) then
+    if not SafeEntity.is_valid(entity) then
         if data and data.player_index and data.unit_number then end_session(data.player_index, data.unit_number) end
         return
     end
@@ -275,62 +1303,74 @@ function Queue.repair(data)
         touch_session(data.player_index, data.unit_number)
     end
 
-    local ratio = entity.get_health_ratio()
-    if not ratio or ratio >= 1 then
+    -- v5.1: Безопасное получение health ratio
+    local ratio = SafeEntity.get_health_ratio(entity, 1)
+    if ratio >= 1 then
         if data and data.player_index and data.unit_number then end_session(data.player_index, data.unit_number) end
         return
     end
 
-    local ammo = data.ammo
-    if not (ammo and ammo.valid_for_read) then
-        if data and data.player_index and data.unit_number then end_session(data.player_index, data.unit_number) end
-        return
-    end
+    -- Previously launched nanobots may still have paid repair capacity even if
+    -- their magazine is now empty. New capacity is charged at the point of use.
 
     if cfg.network_limits and not nano_network_check(player.character, entity) then
         return
     end
 
-    local radius = get_ammo_radius(player, ammo)
-    local dx = player.character.position.x - entity.position.x
-    local dy = player.character.position.y - entity.position.y
+    local _, equipped_ammo, equipped_name = get_gun_ammo_name(player, 'gun-nano-emitter')
+    -- A repair already launched may finish from its paid budget. Require the
+    -- correct ammo before consuming any further charge.
+    local radius = data.repair_radius or get_ammo_radius(player, equipped_name == 'ammo-nano-constructors' and equipped_ammo or nil)
+    
+    -- v5.1: Безопасное получение позиций для проверки радиуса
+    local player_pos = SafeEntity.get_position(player.character, {x=0, y=0})
+    local entity_pos = SafeEntity.get_position(entity, {x=0, y=0})
+    local dx = player_pos.x - entity_pos.x
+    local dy = player_pos.y - entity_pos.y
     if (dx * dx + dy * dy) > (radius * radius) then
         return
     end
 
-    local max_health = entity.max_health or 100
-    local current_health = entity.health or 0
+    -- v5.1: Безопасное получение health
+    local max_health = SafeEntity.get_property(entity, "max_health", 100)
+    local current_health = SafeEntity.get_property(entity, "health", 0)
     local damage = max_health - current_health
     if damage <= 0 then
         if data and data.player_index and data.unit_number then end_session(data.player_index, data.unit_number) end
         return
     end
 
-    local repaired, pack_exhausted = use_repair_tool(player, damage)
-    if repaired <= 0 and not pack_exhausted then
+    -- Upgrade migration: old queued first repair actions already consumed one
+    -- nano round while being queued in 5.9.8. Credit them instead of charging
+    -- the player a second time after updating the mod mid-repair.
+    if data.nano_repair_charge_mode ~= 2 and data.repair_shot then
+        local pdata = repair_credit_data(player.index)
+        pdata.nano_repair_hp_credit = (pdata.nano_repair_hp_credit or 0) + REPAIR_HP_PER_NANO_CHARGE
+    end
+
+    local repaired, spent_charge = repair_with_nano_charge(player, entity, damage, current_health, max_health)
+    if repaired <= 0 then
+        if data.unit_number then end_session(data.player_index, data.unit_number) end
         return
     end
 
-    -- IMPORTANT: repair uses nano-projectile-repair now
-    if data.repair_shot and repaired > 0 then
-        local surface = data.surface or entity.surface
-        local force = entity.force
-        create_projectile('nano-projectile-repair', surface, force, player.character.position, entity.position)
-        -- звук можно оставить или убрать:
-        surface.play_sound { path = 'utility/build_small', position = entity.position }
+    -- One visual repair launch per consumed charge (or legacy prepaid launch).
+    if spent_charge or (data.nano_repair_charge_mode ~= 2 and data.repair_shot) then
+        local surface = data.surface or SafeEntity.get_surface(entity)
+        local force = SafeEntity.get_property(entity, "force")
+        
+        if surface and player_pos and entity_pos then
+            create_projectile('nano-projectile-repair', surface, force, player_pos, entity_pos)
+            pcall(function()
+                surface.play_sound { path = 'utility/build_small', position = entity_pos }
+            end)
+        end
     end
 
-    if repaired > 0 then
-        entity.health = math.min(max_health, current_health + repaired)
-        nlog_agg("Отремонтировано", entity.name)
-    end
+    nlog_agg("Отремонтировано", SafeEntity.get_name(entity, "unknown"))
 
-    if not (entity.valid and (entity.get_health_ratio() or 0) < 1) then
+    if not (SafeEntity.is_valid(entity) and SafeEntity.get_health_ratio(entity, 1) < 1) then
         if data and data.player_index and data.unit_number then end_session(data.player_index, data.unit_number) end
-        return
-    end
-
-    if not has_repair_tool(player) then
         return
     end
 
@@ -343,29 +1383,27 @@ function Queue.repair(data)
         surface      = entity.surface,
         unit_number  = data.unit_number or entity.unit_number,
         entity       = entity,
-        action       = 'repair'
+        action       = 'repair',
+        nano_repair_charge_mode = 2,
+        repair_radius = radius,
+        repair_shot = false
     }
-
-    if pack_exhausted then
-        nd.repair_shot = true
-        push_pending_repair(nd, game.tick + delay, true)
-    else
-        nd.repair_shot = false
-        push_pending_repair(nd, game.tick + delay, false)
-    end
+    push_pending_repair(nd, game.tick + delay)
 end
 
 -- Trees (termite ammo)
+local TermiteRocks = require('scripts/termite_rocks')
 local function everyone_hates_trees(player, pos, nano_ammo)
+    TermiteRocks.scan(player, pos, get_ammo_radius(player, nano_ammo), nano_ammo, ammo_drain)
     local radius = get_ammo_radius(player, nano_ammo)
     local force = player.force
 
-    for _, stupid_tree in pairs(player.surface.find_entities_filtered { position = pos, radius = radius, type = 'tree', limit = 200 }) do
+    for _, stupid_tree in pairs(player.character.surface.find_entities_filtered { position = pos, radius = radius, type = 'tree', limit = 200 }) do
         if nano_ammo.valid and nano_ammo.valid_for_read then
             if not stupid_tree.to_be_deconstructed() then
                 local tree_area = Area.expand(stupid_tree.bounding_box, .5)
-                if player.surface.count_entities_filtered { area = tree_area, name = 'nano-cloud-small-termites' } == 0 then
-                    player.surface.create_entity {
+                if player.character.surface.count_entities_filtered { area = tree_area, name = 'nano-cloud-small-termites' } == 0 then
+                    player.character.surface.create_entity {
                         name = 'nano-projectile-termites',
                         position = player.character.position,
                         force = force,
@@ -383,24 +1421,33 @@ local function everyone_hates_trees(player, pos, nano_ammo)
 end
 
 -- Execute item
+local function repair_only(player)
+    return settings.get_player_settings(player)['nanobots-repair-only'].value
+end
+
+local function turret_request(proxy)
+    local target = proxy and proxy.valid and proxy.proxy_target
+    return target and target.valid and
+        (target.type == 'ammo-turret' or target.type == 'artillery-turret' or target.type == 'fluid-turret')
+end
+
 function Queue.execute_item(data)
-    if data.action == 'cliff_deconstruction' then
-        Queue.cliff_deconstruction(data)
-    elseif data.action == 'deconstruction' then
-        Queue.deconstruction(data)
-    elseif data.action == 'build_entity_ghost' then
-        Queue.build_entity_ghost(data)
-    elseif data.action == 'build_tile_ghost' then
-        Queue.build_tile_ghost(data)
-    elseif data.action == 'upgrade_direction' then
-        Queue.upgrade_direction(data)
-    elseif data.action == 'upgrade_ghost' then
-        Queue.upgrade_ghost(data)
-    elseif data.action == 'item_requests' then
-        Queue.item_requests(data)
-    elseif data.action == 'repair' then
-        Queue.repair(data)
+    local action = Queue[data.action]
+    if not action then return end
+    if data.action == 'repair' then return action(data) end
+
+    local player = game.get_player(data.player_index)
+    if not (player and player.valid) then return end
+    local character = get_physical_character(player)
+    local ammo = data.ammo
+    local no_charge = data.charge_on_success and not player.cheat_mode and
+        not (ammo and ammo.valid and ammo.valid_for_read and ammo.name == 'ammo-nano-constructors')
+    local disabled = repair_only(player) and not (data.action == 'item_requests' and turret_request(data.entity))
+    if not character or character.surface ~= data.surface or no_charge or disabled then
+        if data.item_stack then insert_or_spill_items(player, data.item_stack, player.cheat_mode) end
+        return
     end
+    if action(data) and data.charge_on_success then ammo_drain(player, ammo, 1) end
 end
 
 -- Scan in range: repairs + ghosts/deconstruct/upgrades
@@ -413,27 +1460,50 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
     local _next_nano_tick =
         (pdata._next_nano_tick and pdata._next_nano_tick < (game.tick + 2000) and pdata._next_nano_tick) or game.tick
 
-    local tick_spacing =
-        max(1, cfg.queue_rate - (queue_speed[force.get_gun_speed_modifier('nano-ammo')] or queue_speed[4]))
+    -- v5.2: Применяем бонус качества оружия к скорости
+    local _, gun_quality_bonus = QualitySystem.get_gun_quality(player)
+    local base_speed_bonus = queue_speed[force.get_gun_speed_modifier('nano-ammo')] or queue_speed[4]
+    local speed_bonus = QualitySystem.apply_quality_to_speed(base_speed_bonus, gun_quality_bonus)
+    
+    local tick_spacing = max(1, cfg.queue_rate - speed_bonus)
 
     local next_tick, queue_count = queue:next(_next_nano_tick, tick_spacing)
     local radius = get_ammo_radius(player, nano_ammo)
-    local area = Position.expand_to_area(pos, radius)
+    local area = expand_to_area(pos, radius)
 
     -- Repairs optimized scan
     if cfg.do_repair then
         ensure_throttle()
 
-        local in_combat = is_player_in_combat(player)
-        local scan_types = (in_combat and cfg.repair_combat_important_only) and cfg.repair_scan_types_combat or cfg.repair_scan_types_normal
+        -- v5.4.1: PERFORMANCE - Player-level repair scan throttling
+        -- Не сканируем ремонты чаще чем раз в REPAIR_SCAN_THROTTLE_TICKS
+        pdata.last_repair_scan_tick = pdata.last_repair_scan_tick or 0
+        local repair_scan_interval = CONSTANTS.REPAIR_SCAN_THROTTLE_TICKS
+        
+        if (game.tick - pdata.last_repair_scan_tick) < repair_scan_interval then
+            -- Слишком рано для нового сканирования, пропускаем
+            goto skip_repair_scan
+        end
+        
+        pdata.last_repair_scan_tick = game.tick
 
-        if scan_types and #scan_types > 0 and has_repair_tool(player) then
-            local candidates = player.surface.find_entities_filtered {
-                area = area,
-                force = force,
-                type = scan_types,
-                limit = 400
-            }
+        local in_combat = is_player_in_combat(player)
+        local use_priority_filter = (in_combat and cfg.repair_combat_important_only)
+
+        do
+            -- Repair charge is consumed only when the queued action executes.
+            -- No standalone repair pack is necessary.
+            -- В режиме боя - используем приоритетный список типов
+            -- Вне боя - сканируем ВСЁ, что можно ремонтировать
+            local filter_params = { area = area, force = force }
+            
+            if use_priority_filter then
+                -- Режим боя: только важные типы
+                filter_params.type = cfg.repair_scan_types_combat
+            end
+            -- Вне боя: фильтр по типу НЕ добавляется, сканируем всё
+            
+            local candidates = player.character.surface.find_entities_filtered(filter_params)
 
             local list = {}
 
@@ -446,7 +1516,6 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
                             local last = storage.repair_last_scan_tick[unit]
                             local throttle = cfg.repair_throttle_ticks or 0
                             if (not last) or throttle <= 0 or (game.tick - last) >= throttle then
-                                storage.repair_last_scan_tick[unit] = game.tick
 
                                 local already_session = session_active(player.index, unit)
                                 local can_start = (not already_session) and can_start_new_session(player.index)
@@ -454,7 +1523,8 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
                                 if already_session or can_start then
                                     if not queue:get_hash(entity) then
                                         local pr = get_repair_priority(entity)
-                                        if not (in_combat and cfg.repair_combat_important_only) or pr <= 40 then
+                                        -- В бою проверяем приоритет, вне боя - ремонтируем всё
+                                        if not use_priority_filter or pr <= 40 then
                                             list[#list + 1] = {
                                                 entity = entity,
                                                 unit = unit,
@@ -495,10 +1565,11 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
                         unit_number = rec.unit,
                         entity = entity,
                         action = 'repair',
-                        repair_shot = true
+                        repair_shot = true,
+                        nano_repair_charge_mode = 2,
+                        repair_radius = radius
                     }
                     queue:insert(data, next_tick())
-                    ammo_drain(player, nano_ammo, 1)
                     start_session(player.index, rec.unit)
                 else
                     local data = {
@@ -509,18 +1580,30 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
                         unit_number = rec.unit,
                         entity = entity,
                         action = 'repair',
-                        repair_shot = false
+                        repair_shot = false,
+                        nano_repair_charge_mode = 2,
+                        repair_radius = radius
                     }
                     queue:insert(data, next_tick())
                 end
+
+                storage.repair_last_scan_tick[rec.unit] = game.tick
 
                 ::continue_repair_loop::
             end
         end
     end
+    
+    ::skip_repair_scan::  -- v5.4.1: Label for repair scan throttling
+
+    -- v5.4.3: Ghost scan throttling REMOVED
+    -- Причина: item-request-proxy обрабатывается внутри ghost loop
+    -- Throttling блокировал важные запросы топлива/модулей для машин
+    -- Ghost scan достаточно быстрый, не требует агрессивного throttling
 
     -- Ghosts/deconstruct/upgrades scan (FIXED invalid access)
-    for _, ghost in pairs(player.surface.find_entities(area)) do
+    local repairs_only = repair_only(player)
+    for _, ghost in pairs(player.character.surface.find_entities(area)) do
         if not (ghost and ghost.valid) then
             goto continue_ghost_loop
         end
@@ -561,13 +1644,15 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
             entity      = ghost
         }
 
-        if ghost.name == 'item-request-proxy' and cfg.do_proxies then
+        if ghost.name == 'item-request-proxy' and cfg.do_proxies and (not repairs_only or turret_request(ghost)) then
             data.action = 'item_requests'
             data.target = ghost.proxy_target
+            data.charge_on_success = true
             queue:insert(data, next_tick())
-            ammo_drain(player, nano_ammo, 1)
             goto continue_ghost_loop
         end
+
+        if repairs_only then goto continue_ghost_loop end
 
         if deconstruct then
             if ghost.type == 'cliff' then
@@ -578,8 +1663,8 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
                         if explosive then
                             data.item_stack = explosive
                             data.action = 'cliff_deconstruction'
+                            data.charge_on_success = true
                             queue:insert(data, next_tick())
-                            ammo_drain(player, nano_ammo, 1)
                         end
                     end
                 end
@@ -587,29 +1672,34 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
                 data.action = 'deconstruction'
                 data.deconstructors = true
                 queue:insert(data, next_tick())
-                ammo_drain(player, nano_ammo, 1)
             end
         elseif upgrade then
-            local prototype = ghost.get_upgrade_target()
+            -- Factorio 2.0: get_upgrade_target() returns prototype, quality
+            local prototype, upgrade_quality = ghost.get_upgrade_target()
             if prototype then
                 if prototype.name == ghost.name then
-                    local dir = ghost.get_upgrade_direction()
-                    if ghost.direction ~= dir then
-                        data.action = 'upgrade_direction'
-                        data.direction = dir
-                        queue:insert(data, next_tick())
-                        ammo_drain(player, nano_ammo, 1)
-                    end
+                    -- Factorio 2.0: get_upgrade_direction() removed
+                    -- Try to get upgrade direction, skip if not available
+                    local ok, dir = pcall(function() return ghost.direction end)
+                    -- Direction-only upgrades are handled natively in 2.0
+                    -- Just skip this case — robots/player handle rotation
                 else
                     local item_stack = local_find_item(prototype.items_to_place_this, player, false)
                     if item_stack then
-                        data.action = 'upgrade_ghost'
-                        local place_item = get_items_from_inv(player, item_stack, player.cheat_mode)
+                        -- v5.8.0: Quality from get_upgrade_target() second return
+                        local required_quality = (upgrade_quality and upgrade_quality.name) or "normal"
+                        local required_stack = {
+                            name = item_stack.name,
+                            count = item_stack.count,
+                            quality = required_quality
+                        }
+                        local place_item = get_items_from_inv(player, required_stack, player.cheat_mode)
                         if place_item then
+                            data.action = 'upgrade_ghost'
                             data.entity_name = prototype.name
                             data.item_stack = place_item
+                            data.charge_on_success = true
                             queue:insert(data, next_tick())
-                            ammo_drain(player, nano_ammo, 1)
                         end
                     end
                 end
@@ -617,15 +1707,29 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
         elseif ghost.name == 'entity-ghost' or (ghost.name == 'tile-ghost' and cfg.build_tiles) then
             local proto = ghost.ghost_prototype
             local item_stack = local_find_item(proto.items_to_place_this, player, false)
+            if not item_stack then
+                local material = proto.items_to_place_this and proto.items_to_place_this[1]
+                if material then
+                    report_work_blocker(player, {'nanobots-work-status.missing-material', prototypes.item[material.name].localised_name})
+                end
+            end
             if item_stack then
                 if ghost.name == 'entity-ghost' then
-                    local place_item = get_items_from_inv(player, item_stack, player.cheat_mode)
+                    -- v5.0: Используем SafeEntity для безопасного получения качества
+                    local ghost_quality = SafeEntity.get_quality(ghost, "normal")
+                    -- Создаем item_stack с нужным качеством
+                    local required_stack = {
+                        name = item_stack.name,
+                        count = item_stack.count,
+                        quality = ghost_quality
+                    }
+                    local place_item = get_items_from_inv(player, required_stack, player.cheat_mode)
                     if place_item then
                         data.action = 'build_entity_ghost'
                         data.entity_name = proto.name
                         data.item_stack = place_item
+                        data.charge_on_success = true
                         queue:insert(data, next_tick())
-                        ammo_drain(player, nano_ammo, 1)
                     end
                 elseif ghost.name == 'tile-ghost' then
                     local tile = ghost.surface.get_tile(ghost.position)
@@ -634,8 +1738,8 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
                         if place_item then
                             data.item_stack = place_item
                             data.action = 'build_tile_ghost'
+                            data.charge_on_success = true
                             queue:insert(data, next_tick())
-                            ammo_drain(player, nano_ammo, 1)
                         end
                     end
                 end
@@ -648,9 +1752,68 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
     pdata._next_nano_tick = next_tick() or game.tick
 end
 
--- on_tick
+-- on_tick (UNIFIED: poll_players + AutoDefense + visualization)
+local function update_status()
+    local counts = {}
+    for _, player in pairs(game.connected_players) do
+        if settings.get_player_settings(player)['nanobots-show-status'].value then
+            counts[player.index] = 0
+        else
+            local label = player.gui.top.nanobots_work_status
+            if label then label.destroy() end
+        end
+    end
+    if not next(counts) then return end
+
+    for tick, tasks in pairs(queue) do
+        if type(tick) == 'number' then
+            for _, task in ipairs(tasks) do
+                local index = task.player_index
+                if counts[index] then counts[index] = counts[index] + 1 end
+            end
+        end
+    end
+
+    for index, count in pairs(counts) do
+        local player = game.get_player(index)
+        local label = player.gui.top.nanobots_work_status or
+            player.gui.top.add{type='label', name='nanobots_work_status'}
+        local character = get_physical_character(player)
+        local gun = character and get_gun_ammo_name(player, 'gun-nano-emitter')
+        local reason = 'ready'
+        if not character then
+            reason = 'no-character'
+        elseif not cfg.nanobots_auto then
+            reason = 'disabled'
+        elseif not is_connected_player_ready(player) then
+            reason = 'inactive'
+        elseif not gun then
+            reason = 'no-ammo'
+        elseif cfg.network_limits and not nano_network_check(character) then
+            reason = 'network'
+        elseif repair_only(player) then
+            reason = 'repair-only'
+        end
+        local message = {'nanobots-work-status.' .. reason}
+        local blocker = storage.work_blockers and storage.work_blockers[index]
+        if (reason == 'ready' or reason == 'repair-only') and blocker and game.tick - blocker.tick < 300 then
+            message = blocker.message
+        end
+        label.caption = {'nanobots-work-status.caption', count, message}
+    end
+end
+
 local function poll_players(event)
     flush_aggregated_messages()
+
+    -- AutoDefense (protected - errors here should not block construction)
+    pcall(AutoDefense.on_tick)
+
+    -- AutoDefense GUI update (every 1 second)
+    if event.tick % 60 == 0 then
+        pcall(AutoDefense.update_open_guis)
+        update_status()
+    end
 
     if event.tick % max(1, floor(cfg.poll_rate / #game.connected_players)) == 0 then
         local last_player, player = next(game.connected_players, storage._last_player)
@@ -659,9 +1822,9 @@ local function poll_players(event)
                 local gun, nano_ammo, ammo_name = get_gun_ammo_name(player, 'gun-nano-emitter')
                 if gun then
                     if ammo_name == 'ammo-nano-constructors' then
-                        queue_ghosts_in_range(player, player.character.position, nano_ammo)
-                    elseif ammo_name == 'ammo-nano-termites' then
-                        everyone_hates_trees(player, player.character.position, nano_ammo)
+                        queue_ghosts_in_range(player, (get_physical_position(player) or player.character.position), nano_ammo)
+                    elseif ammo_name == 'ammo-nano-termites' and not repair_only(player) then
+                        everyone_hates_trees(player, (get_physical_position(player) or player.character.position), nano_ammo)
                     end
                 end
             end
@@ -672,21 +1835,37 @@ local function poll_players(event)
         storage._last_player = last_player
     end
 
-    queue:execute(event)
+    queue:execute(event, Queue.execute_item)
     process_pending_repairs()
 
     if event.tick % 60 == 0 then
         cleanup_sessions_all()
     end
+
+    -- Visualization update (every 0.5 seconds)
+    if event.tick % CONSTANTS.VISUALIZATION_UPDATE_TICKS == 0 then
+        for _, player in pairs(game.connected_players) do
+            if QualitySystem.is_visualization_enabled(player) then
+                QualitySystem.update_radius_visualization(player)
+            else
+                storage.radius_rendering = storage.radius_rendering or {}
+                local pdata = storage.radius_rendering[player.index]
+                if pdata and pdata.circle_id then
+                    QualitySystem.destroy_circle(pdata.circle_id)
+                    pdata.circle_id = nil
+                end
+            end
+        end
+    end
 end
 
-script.on_event(defines.events.on_tick, poll_players)
+Event.register(defines.events.on_tick, poll_players)
 
 local function players_changed()
     storage._last_player = nil
 end
 
-script.on_event({ defines.events.on_player_joined_game, defines.events.on_player_left_game }, players_changed)
+Event.register({ defines.events.on_player_joined_game, defines.events.on_player_left_game }, players_changed)
 
 -- init/load/reset
 local function on_nano_init()
@@ -701,13 +1880,13 @@ local function on_nano_init()
     nlog("🤖 Nanobots initialized")
 end
 
-script.on_init(on_nano_init)
+Event.register(Event.core_events.init, on_nano_init)
 
 local function on_nano_load()
     queue = Queue(storage.nano_queue)
 end
 
-script.on_load(on_nano_load)
+Event.register(Event.core_events.load, on_nano_load)
 
 local function reset_nano_queue()
     storage.nano_queue = nil
@@ -726,4 +1905,61 @@ local function reset_nano_queue()
     end
 end
 
-script.on_event(Event.generate_event_name('reset_nano_queue'), reset_nano_queue)
+Event.register(Event.generate_event_name('reset_nano_queue'), reset_nano_queue)
+
+-- v5.2: Обработчики для визуализации радиуса
+Event.register(defines.events.on_lua_shortcut, function(event)
+    if event.prototype_name == "nanobots-toggle-radius" then
+        local player = game.get_player(event.player_index)
+        if player and player.valid then
+            local enabled = QualitySystem.toggle_radius_visualization(player)
+            player.set_shortcut_toggled("nanobots-toggle-radius", enabled)
+        end
+    elseif event.prototype_name == "nanobots-switch-ammo" then
+        AmmoSwitch.toggle(game.get_player(event.player_index))
+    elseif event.prototype_name == "nanobots-toggle-auto-defense" then
+        -- v5.5.0: Auto-Defense toggle
+        local player = game.get_player(event.player_index)
+        if player and player.valid then
+            AutoDefense.toggle(player)
+            local player_data = storage.auto_defense and storage.auto_defense[player.index]
+            if player_data then
+                player.set_shortcut_toggled("nanobots-toggle-auto-defense", player_data.enabled)
+            end
+        end
+    end
+end)
+
+-- Обновление визуализации при смене оружия
+Event.register(defines.events.on_player_cursor_stack_changed, function(event)
+    local player = game.get_player(event.player_index)
+    if player and player.valid then
+        -- v5.2.2: Обновляем только если визуализация включена
+        if QualitySystem.is_visualization_enabled(player) then
+            QualitySystem.update_radius_visualization(player)
+        else
+            -- Если отключена, убедимся что круг удалён
+            storage.radius_rendering = storage.radius_rendering or {}
+            local pdata = storage.radius_rendering[player.index]
+            if pdata and pdata.circle_id then
+                QualitySystem.destroy_circle(pdata.circle_id)
+                pdata.circle_id = nil
+            end
+        end
+    end
+end)
+
+-- v5.4.0: Visualization update moved into unified on_tick (poll_players)
+
+-- Очистка при выходе игрока (сохраняем состояние для перезахода)
+Event.register(defines.events.on_player_left_game, function(event)
+    QualitySystem.on_player_left(event.player_index)
+end)
+
+-- Полное удаление данных при удалении игрока из игры
+Event.register(defines.events.on_player_removed, function(event)
+    QualitySystem.on_player_removed(event.player_index)
+end)
+
+
+

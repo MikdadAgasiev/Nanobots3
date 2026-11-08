@@ -1,0 +1,504 @@
+---------------------------------------------------------------------------------------------------
+Version: 5.9.18
+Date: 2026-11-08
+  Bugfixes:
+    - Fixed a crash when control signals schedule logistic network interface tasks.
+    - Restored interface task dispatch independently of personal nanobot task checks.
+---------------------------------------------------------------------------------------------------
+Version: 5.9.17
+Date: 2026-11-05
+  Bugfixes:
+    - Repair scans no longer overlook damaged structures behind the first 400 entities in dense factories.
+    - Repair target cooldown starts when a task is queued rather than when the target is found.
+---------------------------------------------------------------------------------------------------
+Version: 5.9.16
+Date: 2026-11-04
+  Features:
+    - Added per-player settings for a nanobot status label and repair/turret supply mode.
+  Bugfixes:
+    - Queued construction, upgrades, cliff removal and item delivery now spend a charge after success.
+    - Queue keys distinguish surfaces, and cancelled tasks return reserved materials.
+---------------------------------------------------------------------------------------------------
+Version: 5.9.15
+Date: 2026-11-04
+  Balancing:
+    - Speed and range upgrades now use early red and green science progression without Engine, Electric engine or Robotics prerequisites.
+    - Added a startup setting to restore the original prerequisites and research costs.
+---------------------------------------------------------------------------------------------------
+Version: 5.9.14
+Date: 2026-11-04
+  Bugfixes:
+    - Fixed entity and tile deconstruction in remote view by mining through the physical character.
+    - Construction nanobots now spend a charge on deconstruction only after mining succeeds.
+---------------------------------------------------------------------------------------------------
+Version: 5.9.13
+Date: 2026-11-04
+  Bugfixes:
+    - Fixed an error when returning items with a full inventory. Overflow is dropped at the character's physical location, including in remote view.
+---------------------------------------------------------------------------------------------------
+Version: 5.9.12
+Date: 2026-11-01
+  Features:
+    - Termite ammunition now consumes natural rocks as well as trees, without returning resources.
+    - Added the runtime Map setting "Termites eat rocks", enabled by default. Disabling it preserves rocks without affecting tree clearing.
+    - Only destructible neutral simple entities marked as rocks by their prototype are targeted; rocks marked for deconstruction are preserved.
+  Locale:
+    - Added English and Russian setting labels, descriptions, and updated termite ammunition tooltips.
+---------------------------------------------------------------------------------------------------
+Version: 5.9.11
+Date: 2026-11-01
+  Info:
+    - Documentation and metadata update only; gameplay code is unchanged from 5.9.10.
+    - Clarified that Factorio 2.1 / 5.9.x is the maintained branch; legacy Factorio 2.0 / 5.8.x releases are archived and no longer maintained.
+    - Synchronized bundled README and portal description with current construction, repair, remote-view, vehicle, and dependency information.
+    - Corrected the homepage link and removed an unverified numeric UPS improvement claim from the metadata.
+---------------------------------------------------------------------------------------------------
+Version: 5.9.10
+Date: 2026-11-01
+  Bugfixes:
+    - Keep nanobot construction processing active while the player is using remote view; camera inactivity no longer triggers the AFK pause for the physical character.
+    - Use the physical vehicle when checking and consuming construction materials, including cargo-wagon inventories, while the player is in remote view.
+    - Pass only the physical character to fast-replace operations, avoiding the remote player controller and returning replaced items to the character; preserve last_user separately.
+    - Spill uninserted returned items at the player's physical surface and position instead of the remote camera location.
+    - Use the physical position for construction and repair projectile origins while remote viewing.
+    - Correct cursor-stack partial consumption when only part of a requested stack is taken.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.9.9
+Date: 2026-10-24
+  Changes:
+    - Factorio 2.1 is now the stable release; the 5.9.x series is the actively maintained branch.
+    - Constructor nanobots now repair entities using capacity included in nano ammo, with no separate repair packs required in inventory.
+    - Each nano charge provides up to 30 HP of repairs; unused capacity carries over between repair steps and targets.
+    - Preserved configurable repair HP per step, session limits, scan throttling, and repair visual effects.
+  Bugfixes:
+    - Removed the redundant consumption of repair packs already used to craft nano constructor ammo.
+    - Moved repair ammo spending to the actual repair action, avoiding charges for queued repairs that never execute.
+    - Kept already-paid queued repair shots from older saves from being charged twice after updating.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.9.8
+Date: 2026-10-19
+  Bugfixes:
+    - Fixed Roboport Interface crashes on Factorio 2.1 caused by accessing the removed LuaConstantCombinatorControlBehavior.parameters property.
+    - Read interface circuit signals from active logistic sections, including section multipliers and configured filter values.
+    - Fixed ghost revival results for construction and Roboport Interface parts using the Factorio 2.x multi-return API.
+    - Removed an unsupported revive option and corrected the handling of failed entity destruction.
+    - Fixed legacy global references in diagnostic helpers of the embedded stdlib.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.13
+Date: 2026-10-19
+  Bugfixes:
+    - Fixed ghost revival result handling for construction and Roboport Interface parts using the Factorio 2.0 multi-return API.
+    - Removed an unsupported revive option and corrected the handling of failed entity destruction.
+    - Preserved the existing logistic-section based Roboport Interface signal reading for Factorio 2.0.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.9.7
+Date: 2026-10-18
+  Bugfixes:
+    - The Nano Emitter ammo switch now loads constructor nanobots into an empty ammo slot, falling back to termites when constructors are unavailable.
+    - Show a clear message when neither constructor nanobots nor termites are available in the player's inventory.
+  Locale:
+    - Added English and Russian messages for an empty ammo slot with no usable ammunition in inventory.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.9.6
+Date: 2026-10-18
+  Bugfixes:
+    - Fixed a runtime error when clicking the Nano Emitter ammo switch shortcut by loading its Lua module during control script setup.
+    - Added handling for failed ammo-stack swaps instead of silently leaving the player without feedback.
+  Changes:
+    - Prefer reserve ammo matching the equipped item's quality when switching between constructor nanobots and termites.
+    - Linked the toolbar shortcut to its Alt+T custom input for a consistent tooltip.
+  Locale:
+    - Added Russian text for the ammo-switch controls and player messages.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.9.5
+Date: 2026-10-18
+  Features:
+    - Added Alt+T and a shortcut button to swap Nano Emitter constructor and termite ammunition when the alternative is available in the player's inventory.
+    - Preserved item stack quality and remaining magazine charges by swapping occupied inventory stacks.
+  Bugfixes:
+    - Low nano ammunition warnings now include reserve stacks of the equipped ammunition type and quality in the main inventory.
+    - Other nano ammunition types no longer incorrectly contribute to the available reserve for the equipped ammo.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.9.4
+Date: 2026-10-13
+  Bugfixes:
+    - Fixed repeated "Area for Position not found in package.loaded" warnings while the Nano Emitter is selected.
+    - Replaced all Nanobots3 runtime calls to Position.expand_to_area with direct BoundingBox construction, also covering armor bots and Roboport Interface scans.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.9.3
+Date: 2026-10-10
+  Bugfixes:
+    - Fixed item request processing errors caused by the removal of LuaItemPrototype.fuel_category in Factorio 2.1.20.
+  Compatibility:
+    - Supports both fuel category APIs, preserving compatibility with Factorio 2.1.0 through 2.1.19 and Factorio 2.1.20 or newer.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.9.2
+Date: 2026-09-16
+  Changes:
+    - Removed unnecessary pcall wrappers around to_be_upgraded() and to_be_deconstructed() after entity validity has already been checked.
+    - Simplified queued upgrade and deconstruction checks so invalid entities are rejected before Factorio API methods are called.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.12
+Date: 2026-09-16
+  Changes:
+    - Removed unnecessary pcall wrappers around to_be_upgraded() and to_be_deconstructed() after entity validity has already been checked.
+    - Simplified queued upgrade and deconstruction checks so invalid entities are rejected before Factorio API methods are called.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.11
+Date: 2026-09-15
+  Bugfixes:
+    - Fixed the remaining repeated stdlib2 "Area for Position not found in package.loaded" warning when the Nano Emitter is selected on Factorio 2.0.
+    - Replaced Nanobots3 runtime calls to stdlib2 Position.expand_to_area with direct native BoundingBox construction, avoiding stdlib2's incompatible package.loaded Area lookup on Factorio 2.0.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.10
+Date: 2026-09-13
+  Bugfixes:
+    - Fixed repeated stdlib2 "Area for Position not found in package.loaded" warnings on Factorio 2.0 servers.
+    - Explicitly loads the stdlib2 Area module in Nanobots3 runtime scripts that use Position.expand_to_area, preventing per-player log spam on dedicated servers.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.9.1
+Date: 2026-09-12
+  Bugfixes:
+    - Fixed a startup crash in data-updates.lua when a prototype table such as data.raw.tool is absent.
+    - Hardened Bob's Mods ingredient compatibility checks so optional item prototype tables are safely handled in Factorio 2.1 mod configurations.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.9.0
+Date: 2026-07-18
+  Features:
+    - Embedded the required stdlib2 components directly into Nanobots3.
+  Changes:
+    - Removed the external dependency on the stdlib2 mod.
+    - Redirected all stdlib2 references to internal Nanobots3 modules.
+  Compatibility:
+    - Standalone build for Factorio 2.1.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.9
+Date: 2026-09-05
+  Bugfixes:
+    - Fixed Roboport Interface signal reading for Factorio 2.0 after LuaConstantCombinatorControlBehavior.parameters was removed from the API.
+    - Roboport Interface now reads configured signals from logistic sections, restoring network jobs such as item collection, tree chopping, fish gathering, and depleted miner deconstruction.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.8
+Date: 2026-06-16
+  Bugfixes:
+    - Fixed a regression from 5.8.7 that made the game unplayable even with only this mod installed: "Value must be a dictionary in property tree at ROOT.radar.roboport-interface-scanner.pictures". When porting roboport-interface off stdlib, the hidden scanner's pictures field was wrongly set to an array; radar.pictures must be a sprite dictionary. It is now an explicit empty single-direction RotatedSprite.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.7
+Date: 2026-06-16
+  Bugfixes:
+    - Actually fixed the "Cannot serialise ttype=function" crash on load with Pyanodons Post Processing (pypostprocessing). The real cause is stdlib2's Data/Recipe wrappers attaching function-carrying metatables to prototypes during the data stage; pypostprocessing serialises data.raw and chokes on them. Removed stdlib2 from the entire data stage and rebuilt those prototypes with native data:extend: sounds, all five equipment-bot-chip files, make_shortcut, roboport-interface (vanilla combinator/radar now copied via util.table.deepcopy, empty graphics via util.empty_sprite/empty_animation, recipe unlock via a direct technology effect), and the bob-mods recipe edits in data-updates.lua (native in-place ingredient editing). Runtime scripts still use stdlib2, which is fine because the control stage is not serialised.
+    - The v5.8.6 data-final-fixes approach (stripping metatables after the fact) did not work because the crash happens earlier, during the data stage; it has been removed in favour of this proper fix.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.6
+Date: 2026-06-09
+  Bugfixes:
+    - (Superseded by 5.8.7) Attempted fix for the pypostprocessing "Cannot serialise ttype=function" crash by stripping stdlib metatables in data-final-fixes. Did not resolve it.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.5
+Date: 2026-06-07
+  Bugfixes:
+    - Fixed crash on load when bob mods are combined with Pyanodons (pypostprocessing): "attempt to concatenate field 'name' (a nil value)" in data-updates.lua. The bob-mods recipe edits now pass ingredients as full tables ({type, name, amount}) instead of bare item-name strings, which pypostprocessing's recipe meta requires.
+    - Hardened all bob-mods recipe edits: each replace/add now checks that the recipe and the referenced item actually exist before touching it, and is wrapped in pcall with a log message on failure. Prevents load crashes on bob configurations (or other mod combinations) where items like robot-brain-construction, robot-brain-combat, bob-logistic-zone-expander or basic-circuit-board are absent.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.4
+Date: 2026-06-06
+  Bugfixes:
+    - Fixed Auto-Defense not recognizing turret ammo with Krastorio2 (and other mods), which caused constant false "no ammo" warnings even when compatible ammo was in inventory. Ammo is now detected by the presence of an ammo_category (including categories exposed only through get_ammo_type) instead of a fragile prototype.type == "ammo" check that skipped modded magazines.
+    - Auto-Defense now reads turret accepted ammo categories robustly: handles both string and object entries in attack_parameters.ammo_categories/ammo_category, so modded turrets (railgun, rocket, K2 MWR) match their ammo correctly.
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.3
+Date: 2026-03-03
+  Locale:
+    - Added missing localization keys to all 14 non-EN/RU languages (cs, de, es, es-ES, fr, it, ja, ko, nl, pl, pt-BR, tr, uk, zh-CN, zh-TW): radius visualization messages, quality bonuses, shortcut names/descriptions, and auto-defense hotkey control
+    - Added auto-defense.cfg locale file for all 14 languages (settings names, descriptions, GUI labels, flying text messages) — uses English as base, ready for community translation
+  Info:
+    - Updated mod portal description (MOD_PORTAL_DESCRIPTION.md): cleaned up structure, removed FAQ duplication, added link to FAQ page
+    - Updated FAQ (README.md): restructured as pure Q&A by category, added new questions (empty turrets, wrong ammo warnings, remote view)
+    - Removed redundant OVERVIEW.md
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.2
+Date: 2026-02-24
+  Bugfixes:
+    - Fixed remote view compatibility (Space Exploration, satellite view): all systems (Auto-Defense, construction, repair, Nano Monitor, visualization) now use player.character.surface/position instead of player.surface/position — nanobots keep working at player's physical location while remote viewing, warnings display at character, visualization square stays in place
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.1
+Date: 2026-02-08
+  Bugfixes:
+    - Fixed Auto-Defense consuming termite ammo: system now only works with nano-constructors, skips when termites or other ammo types are loaded
+    - Flying text warning when Auto-Defense is paused due to wrong ammo type (e.g. termites loaded instead of constructors)
+    - New setting: Wrong Ammo Warning Interval (10s/30s/1m/2m/5m/off) — controls how often the warning appears
+    - Nano Monitor now warns when nano-emitter is equipped but ammo slot is empty (red flying text + sound, uses same warning interval setting)
+    - Nano Monitor now respects "Active Emitter Mode" setting: in active mode, warnings only appear when nano-emitter is the selected weapon
+    - Updated "depleted" and "empty" messages to hint player what ammo to insert (constructors or termites)
+    - Fixed missing config require in auto_defense.lua (caused "attempt to index global 'config'" error)
+    - Fixed SafeEntity.revive not correctly parsing Factorio 2.0 API return format (revive returns dictionary, not multiple values) — this caused ghosts to not be built (items taken from inventory then returned)
+    - Fixed unified on_tick: AutoDefense errors no longer block construction/repair systems
+  Factorio 2.0 API Compatibility:
+    - Fixed: replaced removed get_upgrade_quality() — quality now from get_upgrade_target() second return value
+    - Fixed: removed call to get_upgrade_direction() which no longer exists in 2.0
+    - Fixed: roboport-interface revive() now correctly parses dictionary return instead of multiple values
+    - Fixed: roboport-interface get_contents() now handles array format instead of dictionary
+    - Fixed: SafeEntity pcall patterns — use anonymous functions for Factorio userdata method calls (get_module_inventory, destroy, has_flag)
+
+---------------------------------------------------------------------------------------------------
+Version: 5.8.0
+Date: 2026-02-08
+  Optimizations:
+    - CRITICAL: Removed log() from hash_queue.execute — eliminated file I/O on every queue action (50-100+ calls/sec on active bases)
+    - Unified 3 separate on_tick handlers into 1 (poll_players + AutoDefense + visualization) — ~30% event dispatch overhead reduction
+    - Removed pcall from hot loops: quality checks in inventory scan, ammo_drain, get_ammo_radius, get_gun_quality, get_ammo_quality
+    - Rewrote safe_entity.lua: direct property access instead of pcall wrappers (pcall kept only for destroy/revive/has_flag/get_module_inventory)
+    - Replaced linear O(n) search in get_repair_priority with precomputed O(1) lookup table (REPAIR_PRIORITY_MAP)
+    - Cached debug flags (debug_repair_enabled, debug_defense_enabled) — no longer reads settings.global on every nlog/debug_log call
+    - Cached per-player mod settings with 5-second TTL (get_player_setting in auto_defense)
+    - Cached compatible ammo results per turret type with 5-second TTL (find_compatible_ammo)
+    - Cached damage_tier lookup for ammo names (string.lower + string.find called once per item name, not every scan)
+    - Moved QUALITY_COLORS and QUALITY_ORDER to module-level constants (eliminated table re-creation on every ammo delivery)
+    - Incremental GUI update: stats panel now updates only changed numbers instead of full destroy+recreate every second
+    - Removed duplicated bot_radius table from auto_defense.lua — now uses config.BOT_RADIUS
+    - Removed custom table_size() — uses Factorio 2.0 built-in
+    - Removed unnecessary pcall from armor-mods.lua (get_bot_counts, get_chip_radius, get_chip_results)
+    - Removed nested pcall (3 levels) from nano_monitor.lua — single outer pcall in control.lua is sufficient
+    - Protected AutoDefense.on_tick() with pcall in unified handler — errors in auto-defense no longer block construction/repair
+    - Wrapped debug_log calls with string.format behind debug flag check — avoids string allocation when debug disabled
+
+---------------------------------------------------------------------------------------------------
+Version: 5.7.1
+Date: 2026-02-07
+  Bugfixes:
+    - Fixed nanobots not working when personal roboport is toggled OFF
+    - Now correctly detects roboport toggle state (Alt+F or shortcut bar) via character.allow_dispatching_robots
+    - When "Disable nanobots in logistic networks" is enabled, toggling OFF personal roboport allows nanobots to work while keeping robots in inventory
+
+---------------------------------------------------------------------------------------------------
+Version: 5.7.0
+Date: 2026-02-03
+  Features:
+    - Statistics GUI panel (ALT+H): shows session duration, turrets rearmed, ammo delivered, nano charges used
+    - Detailed ammo breakdown by type and quality in GUI (top 8 items shown)
+    - GUI shows "Last Session" data when auto-defense is disabled (with full ammo breakdown)
+    - GUI shows "All Time Totals" with cumulative lifetime statistics (including ammo breakdown)
+    - Combat Mode toggle with notifications: auto-switches ammo priority based on enemy presence
+      - COMBAT (enemies nearby): Always uses BEST ammo (highest damage, best quality)
+      - PEACE (no enemies): Uses player's configured Ammo Priority settings
+      - Disable Combat Mode to always use manual settings
+      - Flying text notification when mode switches
+    - Adaptive Scan Interval: 2x faster when enemies nearby, 1.5x slower in peacetime. Saves UPS
+    - Delivery Projectile Visual: orange nano-projectile from player to turret on each delivery (toggleable)
+    - Global Low Nano Ammo Warning: flying text + sound when nano charges drop below threshold
+      - Works independently of auto-defense or construction systems
+      - Configurable warning repeat interval (30 seconds to 5 minutes)
+    - Square visualization: area indicator now correctly shows square zone (matches actual search area)
+    - Improved modded turret detection: uses entity type (ammo-turret, artillery-turret) instead of name patterns
+  Bugfixes:
+    - Fixed game freeze when enabling auto-defense with low nano charges
+    - Fixed auto-defense using circle search instead of square (now consistent with construction/repair)
+    - Fixed visualization not appearing (Factorio 2.0 rendering API syntax)
+    - Renamed "radius" to "range/area" in UI for accuracy (zone is square, not circular)
+  Technical:
+    - New nano_monitor.lua module for global ammo monitoring (runs on_nth_tick(60))
+    - Uses utility/cannot_build sound (built-in Factorio sound, guaranteed to work)
+    - All entity searches now use area (square) for consistency
+
+---------------------------------------------------------------------------------------------------
+Version: 5.6.6
+Date: 2026-01-31
+  Bugfixes:
+    - Auto-Defense now drains 1 nano-emitter charge per turret delivery (was free before)
+    - If nano ammo runs out mid-scan, delivery stops immediately
+    - Cheat mode skips nano ammo drain (consistent with other nanobot systems)
+  Features:
+    - Ammo-specific insertion sounds (small/large/artillery)
+    - Bundled sound files for reliable playback across all turret types
+  Optimizations:
+    - Fixed settings cache initialization order (was crashing on first load)
+
+---------------------------------------------------------------------------------------------------
+Version: 5.6.5
+Date: 2026-01-30
+  Optimizations:
+    - MEGABASE: Auto-Defense now uses type filter in find_entities_filtered (up to 90% faster on large bases)
+    - Cached global settings (scan_interval, max_per_tick) - no longer read every tick
+    - Added turret name cache with known turrets lookup table (faster modded turret detection)
+    - Local references to commonly used Lua functions (pairs, ipairs, math.*, string.*)
+    - Removed redundant is_turret() check after type-filtered search
+  Technical:
+    - Type filter: {"ammo-turret", "artillery-turret", "fluid-turret"} instead of scanning all entities
+    - Settings cache updated only on on_runtime_mod_setting_changed
+    - Known turrets: gun-turret, artillery-turret, flamethrower-turret, rocket-turret, railgun-turret
+
+---------------------------------------------------------------------------------------------------
+Version: 5.6.4
+Date: 2026-01-30
+  Localization:
+    - Added missing English locale keys (radius-enabled, radius-disabled, quality-bonuses, etc.)
+    - Added [shortcut-description] section for EN and RU
+    - Fixed duplicate keys in [shortcut] section (moved to [shortcut-name])
+    - Complete parity between EN and RU localization files
+
+---------------------------------------------------------------------------------------------------
+Version: 5.6.3
+Date: 2026-01-30
+  Info:
+    - Release label: HOTFIX.
+  Bugfixes:
+    - Fixed "LuaSettings doesn't contain key storage" error
+    - Reverted incorrect replacement of settings.global → settings.storage
+    - settings.global is Factorio API for mod settings (should NOT be changed)
+    - storage is for save data (was correctly changed from global)
+
+---------------------------------------------------------------------------------------------------
+Version: 5.6.2
+Date: 2026-01-30
+  Info:
+    - Release label: HOTFIX.
+  Bugfixes:
+    - CRITICAL: Fixed Auto-Defense not working after save/load (used deprecated 'global' instead of 'storage')
+    - Fixed shortcut button localization (Unknown key: "shortcut-name.nanobots-toggle-auto-defense")
+    - Added missing [shortcut-name] section for proper button names
+  Technical:
+    - Replaced all 'global' references with 'storage' for Factorio 2.0 compatibility
+    - auto_defense.lua, control.lua, nanobots.lua updated
+
+---------------------------------------------------------------------------------------------------
+Version: 5.6.1
+Date: 2026-01-30
+  Info:
+    - Release label: HOTFIX.
+  Bugfixes:
+    - CRITICAL: Fixed "on_load() modifies storage" error that prevented save loading
+    - Removed storage.shortcuts_synced flag from on_load (violates Factorio save/load contract)
+    - Shortcut state sync now handled entirely by on_player_joined_game event
+
+---------------------------------------------------------------------------------------------------
+Version: 5.6.0
+Date: 2026-01-26
+  Features:
+    - NEW: Statistics display when disabling Auto-Defense (turrets rearmed, ammo delivered by type)
+    - NEW: Statistics reset automatically when re-enabling system
+    - Quality-aware ammo prioritization: choose best/worst damage and quality first
+    - Colored flying text with quality display (legendary in gold, epic in purple, etc)
+  Changes:
+    - Hotkey changed: Alt+D → Alt+G (Alt+D conflicts with item deletion)
+    - Localized item names in flying text and statistics
+    - Hierarchical debug settings with visual indentation
+  Optimizations:
+    - Multiplayer performance: players distributed across ticks (reduces CPU spikes)
+    - Radius caching: recalculates every 5 seconds instead of every scan
+    - Smart player scheduling: processes ~1-2 players per interval instead of all at once
+  Bugfixes:
+    - Fixed ammo quality detection (was always delivering normal quality)
+    - Fixed debug log spam from character entities
+    - Fixed repair system logs appearing when checkbox disabled
+  Technical:
+    - Player scan distribution algorithm for large multiplayer servers
+    - Radius cache with 300 tick (5 second) expiration
+    - Statistics tracking per ammo type with localized names
+
+---------------------------------------------------------------------------------------------------
+Version: 5.5.0
+Date: 2026-01-25
+  Features:
+    - NEW Auto-Defense System: Automatic turret ammunition delivery using nanobot radius
+    - Hotkey Alt+D to toggle auto-defense on/off
+    - Automatically refills gun turrets, artillery turrets, and modded ammo turrets
+    - Smart ammo detection: uses same type if turret has ammo, auto-detects for empty turrets
+    - Separate settings for gun turrets and artillery (different thresholds/delivery amounts)
+    - Debug mode: enable via "Nanobots log level: debug" OR dedicated Auto-Defense debug setting
+    - Combined dropdown settings: threshold and delivery in one (e.g. "5 rounds", "25%", "50%")
+  Technical:
+    - Factorio 2.0 API compatibility: ItemWithQualityCounts, prototypes.item, ammo_category
+    - Quality System integration (ready for future quality ammo support)
+    - Uses nanobot radius from equipment + ammo quality bonuses
+    - Scans every 60 ticks (1 second) with configurable interval
+  Changes:
+    - Simplified settings: removed unused laser/flamethrower options
+    - Settings structure: 7 per-player + 3 global = 10 total settings
+    - Improved threshold system: absolute (1-10 rounds) or percentage (25%, 50%, 75%, 100%)
+  Important:
+    - Upgrading from 5.4.x: old Auto-Defense settings will be reset (reconfigure in mod settings)
+    - Enable debug: Settings → Mod Settings → Per Player → Nanobots log level → "debug"
+    - Does NOT refill laser turrets (no ammo) or flamethrower turrets (liquid, not ammo)
+
+---------------------------------------------------------------------------------------------------
+Version: 5.4.26
+Date: 2026-01-24
+  Bugfixes:
+    - Fixed tank ammo priority
+
+---------------------------------------------------------------------------------------------------
+Version: 5.4.25
+Date: 2026-01-24
+  Bugfixes:
+    - Fixed proxy destruction
+
+---------------------------------------------------------------------------------------------------
+Version: 5.4.24
+Date: 2026-01-24
+  Info:
+    - Documented API limitations
+
+---------------------------------------------------------------------------------------------------
+Version: 5.4.23
+Date: 2026-01-24
+  Features:
+    - Added car_ammo support
+
+---------------------------------------------------------------------------------------------------
+Version: 5.4.22
+Date: 2026-01-24
+  Bugfixes:
+    - Fixed item availability logic
+
+---------------------------------------------------------------------------------------------------
+Version: 5.4.21
+Date: 2026-01-24
+  Features:
+    - Added mixed requests
+
+---------------------------------------------------------------------------------------------------
+Version: 5.4.20
+Date: 2026-01-24
+  Bugfixes:
+    - Fixed type priority
+
+---------------------------------------------------------------------------------------------------
+Version: 5.4.19
+Date: 2026-01-24
+  Features:
+    - Added trunk support
+    - Added equipment grid
+
+---------------------------------------------------------------------------------------------------
+Version: 5.4.0
+Date: 2026-01-24
+  Features:
+    - Quality caching
+  Bugfixes:
+    - Performance fixes
+
+
+

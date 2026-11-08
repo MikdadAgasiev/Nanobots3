@@ -1,6 +1,24 @@
 data:extend{
 {
     type = "bool-setting",
+    name = "nanobots-repair-only",
+    setting_type = "runtime-per-user",
+    default_value = false
+},
+{
+    type = "bool-setting",
+    name = "nanobots-show-status",
+    setting_type = "runtime-per-user",
+    default_value = false
+},
+{
+    type = "bool-setting",
+    name = "nanobots-legacy-research-prerequisites",
+    setting_type = "startup",
+    default_value = false
+},
+{
+    type = "bool-setting",
     name = "nanobots-nanobots-auto",
     setting_type = "runtime-global",
     default_value = true,
@@ -92,7 +110,7 @@ data:extend{
     setting_type = "runtime-global",
     default_value = 50,
     maximum_value = 100,
-    minimum_value = 1,
+    minimum_value = 0,
     order = "nanobots-fb[free-bots-per]"
 },
 {
@@ -101,7 +119,7 @@ data:extend{
     setting_type = "runtime-global",
     default_value = "off",
     allowed_values = {"off", "standard", "debug"},
-    order = "nanobots-zz[log-level]"
+    order = "nanobots-za[log-level]"
 },
 {
     type = "bool-setting",
@@ -220,5 +238,209 @@ data:extend{
     setting_type = "runtime-global",
     default_value = false,
     order = "a[nanobots]-r[repair]-i[cat]-e[other]"
+},
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- AUTO-DEFENSE SYSTEM (v5.5.0 - Simplified)
+-- ═══════════════════════════════════════════════════════════════════════════
+{
+    type = "string-setting",
+    name = "nanobots-auto-defense-threshold",
+    setting_type = "runtime-per-user",
+    default_value = "5",
+    allowed_values = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "25%", "50%", "75%", "100%"},
+    order = "nanobots-defense-ba[threshold]"
+},
+
+{
+    type = "string-setting",
+    name = "nanobots-auto-defense-delivery",
+    setting_type = "runtime-per-user",
+    default_value = "50%",
+    allowed_values = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "25%", "50%", "75%", "100%"},
+    order = "nanobots-defense-bb[delivery]"
+},
+
+{
+    type = "string-setting",
+    name = "nanobots-auto-defense-artillery-threshold",
+    setting_type = "runtime-per-user",
+    default_value = "1",
+    allowed_values = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "25%", "50%", "75%", "100%"},
+    order = "nanobots-defense-ca[artillery-threshold]"
+},
+
+{
+    type = "string-setting",
+    name = "nanobots-auto-defense-artillery-delivery",
+    setting_type = "runtime-per-user",
+    default_value = "5",
+    allowed_values = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "25%", "50%", "75%", "100%"},
+    order = "nanobots-defense-cb[artillery-delivery]"
+},
+
+{
+    type = "bool-setting",
+    name = "nanobots-auto-defense-gun-turrets",
+    setting_type = "runtime-per-user",
+    default_value = true,
+    order = "nanobots-defense-da[gun-turrets]"
+},
+
+{
+    type = "bool-setting",
+    name = "nanobots-auto-defense-artillery-turrets",
+    setting_type = "runtime-per-user",
+    default_value = true,
+    order = "nanobots-defense-dd[artillery-turrets]"
+},
+
+{
+    type = "bool-setting",
+    name = "nanobots-auto-defense-modded-turrets",
+    setting_type = "runtime-per-user",
+    default_value = true,
+    order = "nanobots-defense-de[modded-turrets]"
+},
+
+-- Ammo Priority Settings
+{
+    type = "string-setting",
+    name = "nanobots-auto-defense-ammo-type-priority",
+    setting_type = "runtime-per-user",
+    default_value = "best-damage",
+    allowed_values = {"best-damage", "worst-damage"},
+    order = "nanobots-defense-ea[ammo-type-priority]"
+},
+
+{
+    type = "string-setting",
+    name = "nanobots-auto-defense-ammo-quality-priority",
+    setting_type = "runtime-per-user",
+    default_value = "best-quality",
+    allowed_values = {"best-quality", "worst-quality"},
+    order = "nanobots-defense-eb[ammo-quality-priority]"
+},
+
+-- Warning Settings
+{
+    type = "int-setting",
+    name = "nanobots-auto-defense-warning-interval",
+    setting_type = "runtime-per-user",
+    default_value = 300,
+    minimum_value = 30,
+    maximum_value = 300,
+    order = "nanobots-defense-ec[warning-interval]"
+},
+
+-- v5.7.0: Auto-enable delivery system when enemies detected
+{
+    type = "bool-setting",
+    name = "nanobots-auto-defense-auto-enable-combat",
+    setting_type = "runtime-per-user",
+    default_value = false,
+    order = "nanobots-defense-f0[auto-enable-combat]"
+},
+
+-- v5.7.0: Combat Mode (auto-switch ammo priority)
+{
+    type = "bool-setting",
+    name = "nanobots-auto-defense-combat-mode",
+    setting_type = "runtime-per-user",
+    default_value = false,
+    order = "nanobots-defense-fa[combat-mode]"
+},
+
+-- v5.7.0: Adaptive Scan Interval
+{
+    type = "bool-setting",
+    name = "nanobots-auto-defense-adaptive-scan",
+    setting_type = "runtime-per-user",
+    default_value = true,
+    order = "nanobots-defense-fb[adaptive-scan]"
+},
+
+-- v5.7.0: Delivery Projectile Visual
+{
+    type = "bool-setting",
+    name = "nanobots-auto-defense-show-projectile",
+    setting_type = "runtime-per-user",
+    default_value = true,
+    order = "nanobots-defense-fc[show-projectile]"
+},
+
+-- v5.7.0: Low Nano Ammo Warning
+{
+    type = "int-setting",
+    name = "nanobots-auto-defense-low-nano-threshold",
+    setting_type = "runtime-per-user",
+    default_value = 10,
+    minimum_value = 0,
+    maximum_value = 50,
+    order = "nanobots-defense-fd[low-nano-threshold]"
+},
+
+-- v5.7.0: Warning interval (how often to show low ammo warning)
+{
+    type = "string-setting",
+    name = "nanobots-low-nano-warning-interval",
+    setting_type = "runtime-per-user",
+    default_value = "30",
+    allowed_values = {"30", "60", "90", "120", "150", "180", "210", "240", "270", "300"},
+    order = "nanobots-defense-fe[warning-interval]"
+},
+
+-- v5.8.0: Wrong ammo type warning interval
+{
+    type = "string-setting",
+    name = "nanobots-wrong-ammo-warning-interval",
+    setting_type = "runtime-per-user",
+    default_value = "30",
+    allowed_values = {"10", "30", "60", "120", "300", "0"},
+    order = "nanobots-defense-ff[wrong-ammo-interval]"
+},
+
+-- Global Settings
+{
+    type = "int-setting",
+    name = "nanobots-auto-defense-scan-interval",
+    setting_type = "runtime-global",
+    default_value = 60,
+    minimum_value = 15,
+    maximum_value = 300,
+    order = "nanobots-defense-ia[scan-interval]"
+},
+
+{
+    type = "int-setting",
+    name = "nanobots-auto-defense-max-per-tick",
+    setting_type = "runtime-global",
+    default_value = 5,
+    minimum_value = 1,
+    maximum_value = 20,
+    order = "nanobots-defense-ib[max-per-tick]"
+},
+
+-- Debug Settings - separate controls for each system
+{
+    type = "bool-setting",
+    name = "nanobots-debug-repair-system",
+    setting_type = "runtime-global",
+    default_value = true,
+    order = "nanobots-zb[debug-repair]"
+},
+
+{
+    type = "bool-setting",
+    name = "nanobots-debug-defense-system",
+    setting_type = "runtime-global",
+    default_value = true,
+    order = "nanobots-zc[debug-defense]"
 }
 }
+
+data:extend{{
+    type = 'bool-setting', name = 'nanobots-termites-eat-rocks',
+    setting_type = 'runtime-global', default_value = true,
+    order = 'nanobots-bc[termites-eat-rocks]'
+}}

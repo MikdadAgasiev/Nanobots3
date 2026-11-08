@@ -1,17 +1,29 @@
+-- Build the square BoundingBox directly, avoiding stdlib's Area lookup.
+local function expand_to_area(pos, radius)
+    radius = radius or 1
+    return {
+        left_top = {x = pos.x - radius, y = pos.y - radius},
+        right_bottom = {x = pos.x + radius, y = pos.y + radius}
+    }
+end
+
 -------------------------------------------------------------------------------
 --[[armormods]] -- Power Armor module code.
 -------------------------------------------------------------------------------
 local armormods = {}
-local table = require('__stdlib2__/stdlib/utils/table')
+local table = require('__Nanobots3__/stdlib/utils/table')
 
 local config = require('config')
+
+-- v5.2.1: Add SafeEntity for safe entity operations
+local SafeEntity = require('scripts/safe_entity')
 
 --TODO: Store this in storage and update in on_con_changed
 --TODO: Remote call for inserting/removing into table
 local combat_robots = config.COMBAT_ROBOTS
 local healer_capsules = config.FOOD
 
-local Position = require('__stdlib2__/stdlib/area/position')
+local Position = require('__Nanobots3__/stdlib/area/position')
 local max, abs, ceil, floor = math.max, math.abs, math.ceil, math.floor
 
 --(( Helper functions ))-------------------------------------------------------
@@ -59,31 +71,40 @@ local function is_personal_roboport_ready(entity, ignore_radius)
     return entity.grid and cell and cell.mobile and (cell.construction_radius > 0 or ignore_radius)
 end
 
---TODO .15 will have a better/more reliable way to get the construction network
 -- Does the entity have a personal robort and construction robots. Or is in range of a roboport with construction bots.
 -- @param entity: the entity object
 -- @param mobile_only: bool just return available construction bots in mobile cell
 -- @param stationed_only: bool if mobile only return all construction robots
 -- @return number: count of available bots
 local function get_bot_counts(entity, mobile_only, stationed_only)
-    if entity.logistic_network then
+    if not SafeEntity.is_valid(entity) then return 0 end
+    
+    -- v5.8.0: Direct access without pcall (entity.valid already checked)
+    local network = entity.logistic_network
+    
+    if network then
         if mobile_only then
             local cell = entity.logistic_cell
+            
             if cell and cell.mobile then
                 if stationed_only then
-                    return cell.stationed_construction_robot_count
+                    return cell.stationed_construction_robot_count or 0
                 else
-                    return cell.logistic_network.available_construction_robots
+                    return (cell.logistic_network and cell.logistic_network.available_construction_robots) or 0
                 end
             end
         else
             local bots = 0
-            table.each(
-                entity.surface.find_logistic_networks_by_construction_area(entity.position, entity.force),
-                function(network)
-                    bots = bots + network.available_construction_robots
+            local surface = entity.surface
+            local position = entity.position
+            local force = entity.force
+            
+            if surface and position and force then
+                local networks = surface.find_logistic_networks_by_construction_area(position, force)
+                for _, net in pairs(networks) do
+                    bots = bots + (net.available_construction_robots or 0)
                 end
-            )
+            end
             return bots
         end
     else
@@ -114,7 +135,16 @@ end
 local function get_chip_radius(player, chip_name)
     local pdata = storage.players[player.index]
     local c = player.character
-    local max_radius = c and c.logistic_cell and c.logistic_cell.mobile and floor(c.logistic_cell.construction_radius) or 15
+    
+    -- v5.8.0: Direct access without pcall
+    local max_radius = 15
+    if c and c.valid then
+        local cell = c.logistic_cell
+        if cell and cell.mobile and cell.construction_radius then
+            max_radius = floor(cell.construction_radius)
+        end
+    end
+    
     local custom_radius = pdata.ranges[chip_name] or max_radius
     return custom_radius <= max_radius and custom_radius or max_radius
 end
@@ -123,8 +153,18 @@ end
 --At this point player is valid, not afk and has a character
 local function get_chip_results(player, equipment, eq_name, search_type, bot_counter)
     local radius = get_chip_radius(player, eq_name)
-    local area = Position.expand_to_area(player.character.position, radius)
-    local item_entities = equipment and bot_counter(0) > 0 and player.surface.find_entities_filtered {area = area, type = search_type, limit = 200}
+    
+    -- v5.8.0: Direct access (entity valid already checked by caller)
+    local character_pos = player.character.position or {x=0, y=0}
+    local surface = player.character.surface
+    
+    local area = expand_to_area(character_pos, radius)
+    local item_entities = nil
+    
+    if equipment and bot_counter(0) > 0 and surface then
+        item_entities = surface.find_entities_filtered {area = area, type = search_type, limit = 200}
+    end
+    
     local num_items = item_entities and #item_entities or 0
     local num_chips = item_entities and #equipment or 0
     return equipment, item_entities, num_items, num_chips, bot_counter
@@ -148,8 +188,33 @@ end
 
 --Mark items for deconstruction if player has roboport
 local function process_ready_chips(player, equipment)
-    local rad = player.character.logistic_cell.construction_radius
-    local enemy = player.surface.find_nearest_enemy {position = player.character.position, max_distance = rad + 10, force = player.force}
+    if not (player and player.valid and player.character and player.character.valid) then return end
+    
+    -- v5.2.1: Безопасное получение construction_radius
+    local rad = 0
+    pcall(function()
+        local cell = player.character.logistic_cell
+        rad = (cell and cell.construction_radius) or 0
+    end)
+    
+    if rad == 0 then return end
+    
+    -- v5.2.1: Безопасный поиск врагов
+    local enemy = nil
+    local character_pos = SafeEntity.get_position(player.character)
+    local character_force = SafeEntity.get_property(player.character, "force")
+    local surface = SafeEntity.get_surface(player.character)
+    
+    if surface and character_pos and character_force then
+        pcall(function()
+            enemy = surface.find_nearest_enemy {
+                position = character_pos, 
+                max_distance = rad + 10, 
+                force = character_force
+            }
+        end)
+    end
+    
     if not enemy and (equipment['equipment-bot-chip-items'] or equipment['equipment-bot-chip-trees']) then
         local bots_available = get_bot_counts(player.character)
         if bots_available > 0 then
@@ -165,6 +230,7 @@ local function process_ready_chips(player, equipment)
             mark_items(player, get_chip_results(player, equipment['equipment-bot-chip-trees'], 'equipment-bot-chip-trees', 'tree', bot_counter))
         end
     end
+    
     if enemy and equipment['equipment-bot-chip-launcher'] then
         local launchers = equipment['equipment-bot-chip-launcher']
         local num_launchers = #launchers
@@ -178,7 +244,17 @@ local function process_ready_chips(player, equipment)
                 local launcher = launchers[num_launchers]
                 while capsule and existing < (max_bots - capsule.qty) and launcher and launcher.energy >= 500 do
                     if player.remove_item({name = capsule.capsule, count = 1}) == 1 then
-                        player.surface.create_entity {name = capsule.unit, position = player.character.position, force = player.force, target = player.character}
+                        -- v5.2.1: Безопасное создание entity
+                        if surface and character_pos then
+                            pcall(function()
+                                surface.create_entity {
+                                    name = capsule.unit, 
+                                    position = character_pos, 
+                                    force = character_force, 
+                                    target = player.character
+                                }
+                            end)
+                        end
                         launcher.energy = launcher.energy - 500
                         capsule.count = capsule.count - 1
                         existing = existing + capsule.qty
@@ -195,8 +271,12 @@ local function process_ready_chips(player, equipment)
 end
 
 local function emergency_heal_shield(player, feeders, energy_shields)
+    if not (player and player.valid and player.character and player.character.valid) then return end
+    
     local num_feeders = #feeders
-    local pos = increment_position(player.character.position)
+    -- v5.2.1: Безопасное получение позиции для flying text
+    local character_pos = SafeEntity.get_position(player.character, {x=0, y=0})
+    local pos = increment_position(character_pos)
     --Only run if we have less than max shield, Feeder max energy is 480
     for _, shield in pairs(energy_shields.shields) do
         while num_feeders > 0 do
@@ -207,7 +287,20 @@ local function emergency_heal_shield(player, feeders, energy_shields)
                     local heal, locale = get_health_capsules(player)
                     shield.shield = shield.shield + (heal * 1.5)
                     local health_line = {'nanobots.health_line', ceil(abs(shield.shield - last_health)), locale}
-                    player.surface.create_entity {name = 'flying-text', text = health_line, color = defines.color.green, position = pos()}
+                    
+                    -- v5.2.1: Безопасное создание flying text
+                    local surface = SafeEntity.get_surface(player.character)
+                    if surface then
+                        pcall(function()
+                            surface.create_entity {
+                                name = 'flying-text', 
+                                text = health_line, 
+                                color = defines.color.green, 
+                                position = pos()
+                            }
+                        end)
+                    end
+                    
                     feeder.energy = feeder.energy - 120
                 else
                     break
@@ -222,20 +315,47 @@ local function emergency_heal_shield(player, feeders, energy_shields)
 end
 
 local function emergency_heal_player(player, feeders)
+    if not (player and player.valid and player.character and player.character.valid) then return end
+    
     local num_feeders = #feeders
-    local pos = increment_position(player.character.position)
-    local max_health = player.character.max_health * .75
+    -- v5.2.1: Безопасное получение позиции и health
+    local character_pos = SafeEntity.get_position(player.character, {x=0, y=0})
+    local pos = increment_position(character_pos)
+    local max_health_val = SafeEntity.get_property(player.character, "max_health", 100)
+    local max_health = max_health_val * .75
 
     while num_feeders > 0 do
+        if not SafeEntity.is_valid(player.character) then break end
+        
         local feeder = feeders[num_feeders]
         while feeder and feeder.energy >= 120 do
-            if player.character.health < max_health then
-                local last_health = player.character.health
+            local current_health = SafeEntity.get_property(player.character, "health", 0)
+            
+            if current_health < max_health then
+                local last_health = current_health
                 local heal, locale = get_health_capsules(player)
-                player.character.health = last_health + heal
-                local health_line = {'nanobots.health_line', ceil(abs(player.character.health - last_health)), locale}
+                
+                -- v5.2.1: Безопасная установка health
+                pcall(function()
+                    player.character.health = last_health + heal
+                end)
+                
+                local new_health = SafeEntity.get_property(player.character, "health", last_health)
+                local health_line = {'nanobots.health_line', ceil(abs(new_health - last_health)), locale}
                 feeder.energy = feeder.energy - 120
-                player.surface.create_entity {name = 'flying-text', text = health_line, color = defines.color.green, position = pos()}
+                
+                -- v5.2.1: Безопасное создание flying text
+                local surface = SafeEntity.get_surface(player.character)
+                if surface then
+                    pcall(function()
+                        surface.create_entity {
+                            name = 'flying-text', 
+                            text = health_line, 
+                            color = defines.color.green, 
+                            position = pos()
+                        }
+                    end)
+                end
             else
                 return
             end

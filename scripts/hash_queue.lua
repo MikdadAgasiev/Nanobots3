@@ -1,4 +1,5 @@
-local table = require('__stdlib2__/stdlib/utils/table')
+local table = require('__Nanobots3__/stdlib/utils/table')
+local SafeEntity = require('scripts/safe_entity')
 
 local function NtoZ_c(x, y)
     return (x >= 0 and x or (-0.5 - x)), (y >= 0 and y or (-0.5 - y))
@@ -22,7 +23,19 @@ function Queue.new(t)
 end
 
 function Queue.set_hash(t, data)
-    local index = data.entity.unit_number or cantorPair_v7(data.entity.position)
+    -- v5.0: Безопасное получение unit_number и position
+    local entity = data.entity
+    local index
+    
+    if SafeEntity.is_valid(entity) then
+        index = SafeEntity.get_unit_number(entity) or cantorPair_v7(SafeEntity.get_position(entity, {x=0, y=0}))
+    else
+        -- Fallback: используем позицию из data если entity невалиден
+        index = cantorPair_v7(data.position or {x=0, y=0})
+    end
+    
+    local surface = data.surface or (SafeEntity.is_valid(entity) and entity.surface)
+    if surface then index = surface.index .. ":" .. index end
     local hash = t._hash
     hash[index] = hash[index] or {}
     hash[index][data.action] = data.action
@@ -41,8 +54,13 @@ function Queue.count(t)
 end
 
 function Queue.get_hash(t, entity)
-    local index = entity.unit_number or cantorPair_v7(entity.position)
-    return t._hash[index]
+    -- v5.0: Безопасное получение hash
+    if not SafeEntity.is_valid(entity) then
+        return nil
+    end
+    
+    local index = SafeEntity.get_unit_number(entity) or cantorPair_v7(SafeEntity.get_position(entity, {x=0, y=0}))
+    return t._hash[entity.surface.index .. ":" .. index] or t._hash[index]
 end
 
 function Queue.insert(t, data, tick, count)
@@ -74,16 +92,12 @@ function Queue.next(t, _next_tick, tick_spacing, dont_combine)
 end
 
 --Tick handler, handles executing multiple data tables in a queue
-function Queue.execute(t, event)
-    --log("NANOBOTS: execute tick=" .. event.tick)
+function Queue.execute(t, event, execute_item)
     if t[event.tick] then
         for _, data in ipairs(t[event.tick]) do
             local index = data.hash
-			log("NANOBOTS: hash_queue execute action=" .. tostring(data.action))
             if Queue[data.action] then
-                Queue[data.action](data)
-            else
-                log("NANOBOTS: NO handler for action=" .. tostring(data.action))
+                (execute_item or Queue[data.action])(data)
             end
             t._hash[index][data.action] = nil
             if table.size(t._hash[index]) <= 0 then
