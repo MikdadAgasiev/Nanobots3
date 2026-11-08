@@ -1,4 +1,10 @@
 ---------------------------------------------------------------------------------------------------
+Version: 5.9.19
+Date: 2026-11-08
+  Bugfixes:
+    - Preserved item quality when collecting items beneath construction ghosts and from inserters, including leftovers that do not fit in the built entity.
+    - Queue resets now return reserved construction materials instead of discarding them.
+---------------------------------------------------------------------------------------------------
 Version: 5.9.18
 Date: 2026-11-08
   Bugfixes:

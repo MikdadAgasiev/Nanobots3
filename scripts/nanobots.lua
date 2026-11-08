@@ -596,7 +596,7 @@ local function insert_into_entity(entity, item_stacks)
         local name, count, health = stack.name, stack.count, stack.health or 1
         local inserted = entity.insert(stack)
         if inserted ~= count then
-            new_stacks[#new_stacks + 1] = { name = name, count = count - inserted, health = health }
+            new_stacks[#new_stacks + 1] = { name = name, count = count - inserted, health = health, quality = stack.quality }
         end
     end
     return new_stacks
@@ -630,7 +630,8 @@ local function get_all_items_on_ground(entity, existing_stacks)
                     item_stacks[#item_stacks + 1] = {
                         name = item_on_ground.stack.name,
                         count = item_on_ground.stack.count,
-                        health = item_on_ground.health or 1
+                        health = item_on_ground.stack.health or 1,
+                        quality = item_on_ground.stack.quality.name
                     }
                     item_on_ground.destroy()
                 end)
@@ -653,7 +654,8 @@ local function get_all_items_on_ground(entity, existing_stacks)
                         item_stacks[#item_stacks + 1] = { 
                             name = stack.name, 
                             count = stack.count, 
-                            health = stack.health or 1 
+                            health = stack.health or 1,
+                            quality = stack.quality.name
                         }
                         stack.clear()
                     end
@@ -1889,6 +1891,20 @@ end
 Event.register(Event.core_events.load, on_nano_load)
 
 local function reset_nano_queue()
+    -- Construction materials are removed from inventory when a task is queued.
+    -- Return them before discarding the queue, just as for a cancelled task.
+    for tick, tasks in pairs(queue or {}) do
+        if type(tick) == 'number' then
+            for _, data in ipairs(tasks) do
+                if data.item_stack then
+                    local player = game.get_player(data.player_index)
+                    if player and player.valid then
+                        insert_or_spill_items(player, data.item_stack, player.cheat_mode)
+                    end
+                end
+            end
+        end
+    end
     storage.nano_queue = nil
     queue = nil
     storage.nano_queue = Queue()
