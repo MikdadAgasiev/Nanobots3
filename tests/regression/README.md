@@ -15,3 +15,7 @@ The runner creates a temporary copy of the mod and a separate Factorio data dire
 The checks cover item quality on the ground and in inserter hands; partial insertion leftovers; reserved-material refunds on reset, repeated reset, remote view, full inventory and cheat mode; construction cancellation; remote demolition; logistics interface signals; and repair targeting in dense factories without repair packs.
 
 On 5.9.18, the ground, held, overflow, reset and reset-remote checks fail. These failures reproduce the problems addressed by 5.9.19. The cheat-mode check already passes and guards against introducing free-item duplication.
+
+Quality construction checks include all five vanilla qualities, mixed-quality inventories, wrong-quality materials, same-type quality upgrades, changed upgrade plans, vehicle materials in remote view, and switching cheat mode before cancellation or reset. Run selected cases with `--only quality-build quality-matrix quality-vehicle-remote cheat-cancel-on cheat-cancel-off cheat-reset-on cheat-reset-off`.
+
+On 5.9.19, construction with only the requested non-normal quality, quality-only upgrades, changed upgrade-quality plans and all four cheat-mode transition cases fail. Their corresponding checks pass with the 5.9.20 fix. The mixed-quality inventory and wrong-quality rejection checks also guard existing behavior.

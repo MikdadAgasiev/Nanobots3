@@ -428,10 +428,11 @@ local function find_item(simple_stack, _, player, at_least_one)
     return _find_item(simple_stack)
 end
 
-local function local_find_item(list, player, at_least_one)
+local function local_find_item(list, player, at_least_one, quality)
     for _, stack in pairs(list or {}) do
-        if find_item(stack, nil, player, at_least_one) then
-            return stack
+        local candidate = {name = stack.name, count = stack.count, quality = quality or stack.quality}
+        if find_item(candidate, nil, player, at_least_one) then
+            return candidate
         end
     end
     return nil
@@ -583,6 +584,13 @@ local function insert_or_spill_items(entity, item_stacks, is_return_cheat)
         end
         return new_stacks[1] and new_stacks[1].name and true
     end
+end
+
+local function return_reserved_items(player, data)
+    local cheat = data.reserved_in_cheat_mode
+    -- Saves made before this field existed retain their previous refund rule.
+    if cheat == nil then cheat = player.cheat_mode end
+    insert_or_spill_items(player, data.item_stack, cheat)
 end
 
 local function insert_into_entity(entity, item_stacks)
@@ -928,20 +936,20 @@ function Queue.cliff_deconstruction(data)
     local entity, player = data.entity, game.get_player(data.player_index)
     if not (player and player.valid) then return end
     if not (player.character and player.character.valid) then
-        insert_or_spill_items(player, { data.item_stack })
+        return_reserved_items(player, data)
         return
     end
     
     -- v5.1: Безопасная проверка entity
     if not SafeEntity.is_valid(entity) then
-        insert_or_spill_items(player, { data.item_stack })
+        return_reserved_items(player, data)
         return
     end
     
     local should_deconstruct = entity.to_be_deconstructed()
 
     if not should_deconstruct then
-        insert_or_spill_items(player, { data.item_stack })
+        return_reserved_items(player, data)
         return
     end
 
@@ -1016,19 +1024,19 @@ function Queue.build_entity_ghost(data)
 
     if not (player and player.valid) then return end
     if not (player.character and player.character.valid) then
-        insert_or_spill_items(player, { data.item_stack }, player.cheat_mode)
+        return_reserved_items(player, data)
         return
     end
     
     -- v5.0: Проверка ghost через SafeEntity
     if not SafeEntity.is_valid(ghost) then
-        insert_or_spill_items(player, { data.item_stack }, player.cheat_mode)
+        return_reserved_items(player, data)
         return
     end
     
     local ghost_name = SafeEntity.get_property(ghost, "ghost_name")
     if ghost_name ~= data.entity_name then
-        insert_or_spill_items(player, { data.item_stack }, player.cheat_mode)
+        return_reserved_items(player, data)
         return
     end
 
@@ -1046,7 +1054,7 @@ function Queue.build_entity_ghost(data)
         force = ghost_force 
     } then
         insert_or_spill_items(player, item_stacks)
-        insert_or_spill_items(player, { data.item_stack }, player.cheat_mode)
+        return_reserved_items(player, data)
         return
     end
 
@@ -1054,7 +1062,7 @@ function Queue.build_entity_ghost(data)
     local revived, entity, requests = SafeEntity.revive(ghost, { raise_revive = true })
     if not revived then
         insert_or_spill_items(player, item_stacks)
-        insert_or_spill_items(player, { data.item_stack }, player.cheat_mode)
+        return_reserved_items(player, data)
         return
     end
 
@@ -1103,11 +1111,11 @@ function Queue.build_tile_ghost(data)
 
     if not (player and player.valid) then return end
     if not (player.character and player.character.valid) then
-        insert_or_spill_items(player, { data.item_stack })
+        return_reserved_items(player, data)
         return
     end
     if not SafeEntity.is_valid(ghost) then
-        insert_or_spill_items(player, { data.item_stack })
+        return_reserved_items(player, data)
         return
     end
 
@@ -1120,7 +1128,7 @@ function Queue.build_tile_ghost(data)
     local ghost_was_revived = SafeEntity.is_valid(ghost) and SafeEntity.revive(ghost, { raise_revive = true })
     
     if not (tile_was_mined or ghost_was_revived) then
-        insert_or_spill_items(player, { data.item_stack })
+        return_reserved_items(player, data)
         return
     end
 
@@ -1194,11 +1202,11 @@ function Queue.upgrade_ghost(data)
 
     if not (player and player.valid) then return end
     if not (player.character and player.character.valid) then
-        insert_or_spill_items(player, { data.item_stack })
+        return_reserved_items(player, data)
         return
     end
     if not (ghost and ghost.valid) then
-        insert_or_spill_items(player, { data.item_stack })
+        return_reserved_items(player, data)
         return
     end
 
@@ -1206,8 +1214,10 @@ function Queue.upgrade_ghost(data)
     local new_name = data.entity_name or data.item_stack.name
 
     local target, quality = ghost.get_upgrade_target()
-    if not target or target.name ~= new_name then
-        insert_or_spill_items(player, data.item_stack, player.cheat_mode)
+    local target_quality = quality and quality.name or "normal"
+    local reserved_quality = data.item_stack.quality or "normal"
+    if not target or target.name ~= new_name or target_quality ~= reserved_quality then
+        return_reserved_items(player, data)
         return
     end
 
@@ -1224,7 +1234,7 @@ function Queue.upgrade_ghost(data)
         raise_built = true
     }
     if not entity then
-        insert_or_spill_items(player, { data.item_stack })
+        return_reserved_items(player, data)
         return
     end
 
@@ -1380,7 +1390,7 @@ function Queue.repair(data)
 
     local nd = {
         player_index = data.player_index,
-        ammo         = ammo,
+        ammo         = equipped_ammo,
         position     = entity.position,
         surface      = entity.surface,
         unit_number  = data.unit_number or entity.unit_number,
@@ -1446,7 +1456,7 @@ function Queue.execute_item(data)
         not (ammo and ammo.valid and ammo.valid_for_read and ammo.name == 'ammo-nano-constructors')
     local disabled = repair_only(player) and not (data.action == 'item_requests' and turret_request(data.entity))
     if not character or character.surface ~= data.surface or no_charge or disabled then
-        if data.item_stack then insert_or_spill_items(player, data.item_stack, player.cheat_mode) end
+        if data.item_stack then return_reserved_items(player, data) end
         return
     end
     if action(data) and data.charge_on_success then ammo_drain(player, ammo, 1) end
@@ -1643,7 +1653,8 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
             position    = ghost.position,
             surface     = ghost.surface,
             unit_number = ghost.unit_number,
-            entity      = ghost
+            entity      = ghost,
+            reserved_in_cheat_mode = player.cheat_mode
         }
 
         if ghost.name == 'item-request-proxy' and cfg.do_proxies and (not repairs_only or turret_request(ghost)) then
@@ -1679,17 +1690,17 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
             -- Factorio 2.0: get_upgrade_target() returns prototype, quality
             local prototype, upgrade_quality = ghost.get_upgrade_target()
             if prototype then
-                if prototype.name == ghost.name then
+                local required_quality = (upgrade_quality and upgrade_quality.name) or "normal"
+                if prototype.name == ghost.name and required_quality == SafeEntity.get_quality(ghost) then
                     -- Factorio 2.0: get_upgrade_direction() removed
                     -- Try to get upgrade direction, skip if not available
                     local ok, dir = pcall(function() return ghost.direction end)
                     -- Direction-only upgrades are handled natively in 2.0
                     -- Just skip this case — robots/player handle rotation
                 else
-                    local item_stack = local_find_item(prototype.items_to_place_this, player, false)
+                    local item_stack = local_find_item(prototype.items_to_place_this, player, false, required_quality)
                     if item_stack then
                         -- v5.8.0: Quality from get_upgrade_target() second return
-                        local required_quality = (upgrade_quality and upgrade_quality.name) or "normal"
                         local required_stack = {
                             name = item_stack.name,
                             count = item_stack.count,
@@ -1708,7 +1719,8 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
             end
         elseif ghost.name == 'entity-ghost' or (ghost.name == 'tile-ghost' and cfg.build_tiles) then
             local proto = ghost.ghost_prototype
-            local item_stack = local_find_item(proto.items_to_place_this, player, false)
+            local ghost_quality = SafeEntity.get_quality(ghost, "normal")
+            local item_stack = local_find_item(proto.items_to_place_this, player, false, ghost_quality)
             if not item_stack then
                 local material = proto.items_to_place_this and proto.items_to_place_this[1]
                 if material then
@@ -1718,7 +1730,6 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
             if item_stack then
                 if ghost.name == 'entity-ghost' then
                     -- v5.0: Используем SafeEntity для безопасного получения качества
-                    local ghost_quality = SafeEntity.get_quality(ghost, "normal")
                     -- Создаем item_stack с нужным качеством
                     local required_stack = {
                         name = item_stack.name,
@@ -1899,7 +1910,7 @@ local function reset_nano_queue()
                 if data.item_stack then
                     local player = game.get_player(data.player_index)
                     if player and player.valid then
-                        insert_or_spill_items(player, data.item_stack, player.cheat_mode)
+                        return_reserved_items(player, data)
                     end
                 end
             end
