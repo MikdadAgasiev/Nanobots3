@@ -1,4 +1,13 @@
 ---------------------------------------------------------------------------------------------------
+Version: 5.9.20
+Date: 2026-11-15
+  Bugfixes:
+    - Construction now finds items of the ghost's quality even when no normal-quality item is available.
+    - Nanobots can upgrade a building's quality without changing its type.
+    - Changing an upgrade target's quality before execution returns the reserved item instead of using it for a different quality.
+    - Newly queued tasks retain the cheat mode at reservation, preventing material losses and duplication when the mode changes before cancellation or reset.
+    - Requeued repairs retain the equipped ammunition reference.
+---------------------------------------------------------------------------------------------------
 Version: 5.9.19
 Date: 2026-11-08
   Bugfixes:

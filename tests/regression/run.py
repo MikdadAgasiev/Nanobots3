@@ -20,6 +20,16 @@ remote.add_interface('item_safety_test', {
     insert = insert_into_entity,
     refund = function(index, stacks) insert_or_spill_items(game.get_player(index), stacks) end,
     reset = reset_nano_queue,
+    pending = function(index)
+        for tick, tasks in pairs(queue or {}) do
+            if type(tick) == 'number' then
+                for _, task in ipairs(tasks) do
+                    if task.player_index == index and task.item_stack then return true end
+                end
+            end
+        end
+        return false
+    end,
     reserve = function(index)
         local player = game.get_player(index)
         for _, count in ipairs{1,2} do
@@ -31,6 +41,7 @@ remote.add_interface('item_safety_test', {
 '''
 cases = [(mode, 'item-safety', mode, 30) for mode in ['ground','held','overflow','reset','reset-remote','reset-cheat','reset-full']]
 cases += [('cancel','queue-cancellation','cancel',240),('demolition','map-demolition','remote',300),('interface','interface-signal','signal',700),('dense-repair','dense-repair','far',1000)]
+cases += [(mode, 'quality-construction', mode, 300) for mode in ['quality-build','quality-mixed','quality-wrong','quality-upgrade','quality-upgrade-type','quality-retarget','quality-matrix','quality-vehicle-remote','cheat-cancel-on','cheat-cancel-off','cheat-reset-on','cheat-reset-off']]
 if args.only:
     cases = [case for case in cases if case[0] in args.only]
 results = here / 'results'
