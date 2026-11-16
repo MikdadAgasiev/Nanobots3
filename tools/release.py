@@ -368,8 +368,8 @@ class Runner:
             time.sleep(min(15, self.remaining()))
         # CI may still be running; never merge a failed required quick check.
         while True:
-            checks = self.gh("GET", "actions/runs", params={"head_sha": head, "per_page": 100})
-            runs = checks.get("workflow_runs", [])
+            checks = self.gh("GET", "actions/runs", params={"per_page": 100})
+            runs = [r for r in checks.get("workflow_runs", []) if r.get("head_sha") == head]
             required = [r for r in runs if r.get("name") == "Quick checks"]
             if required:
                 latest = max(required, key=lambda r: (r.get("run_number", 0), r.get("run_attempt", 1)))
