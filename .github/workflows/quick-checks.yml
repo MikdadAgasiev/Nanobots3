@@ -1,0 +1,20 @@
+name: Quick checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+concurrency:
+  group: quick-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  quick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python -m pip install 'lupa>=2.6,<3' 'requests>=2.32,<3'
+      - run: python tools/release.py check --budget 180
