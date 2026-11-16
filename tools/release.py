@@ -297,6 +297,10 @@ class Runner:
             raise ReleaseError("Unexpected API destination")
         headers = {"Accept": "application/vnd.github+json"} if "github.com" in parsed.hostname else {}
         headers.update(kwargs.pop("headers", {}))
+        if method.upper() == "GET":
+            # Release reconciliation must observe fresh state after mutations.
+            headers["Cache-Control"] = "no-cache"
+            kwargs["params"] = {**kwargs.get("params", {}), "_release_check": time.time_ns()}
         if key:
             headers["Authorization"] = "Bearer " + key
         try:
