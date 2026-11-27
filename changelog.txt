@@ -1,4 +1,9 @@
 ---------------------------------------------------------------------------------------------------
+Version: 5.9.21
+Date: 2026-11-27
+  Bugfixes:
+    - Cliff demolition with grenades now works while seated in vehicles carrying loaded explosive ammunition. Unavailable weapon-slot ammunition no longer blocks usable explosives in the backpack or trunk.
+---------------------------------------------------------------------------------------------------
 Version: 5.9.20
 Date: 2026-11-15
   Bugfixes:
