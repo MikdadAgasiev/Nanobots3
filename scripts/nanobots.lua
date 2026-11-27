@@ -675,11 +675,7 @@ local function get_all_items_on_ground(entity, existing_stacks)
     return (item_stacks[1] and item_stacks) or {}
 end
 
-local function get_items_from_inv(entity, item_stack, cheat, at_least_one)
-    if cheat then
-        return { name = item_stack.name, count = item_stack.count, health = 1, quality = item_stack.quality }
-    end
-
+local function get_item_sources(entity)
     local sources = {}
     local vehicle = get_physical_vehicle(entity)
     local character = get_physical_character(entity)
@@ -695,6 +691,39 @@ local function get_items_from_inv(entity, item_stack, cheat, at_least_one)
     elseif character then
         sources[#sources + 1] = character
     end
+    return sources
+end
+
+-- Match the inventories used by get_items_from_inv; loaded vehicle ammunition
+-- must not hide an available alternative such as grenades in the backpack.
+local function find_cliff_explosive(player)
+    local sources = get_item_sources(player)
+    for _, candidate in ipairs(explosives) do
+        if player.cheat_mode then return candidate end
+        local filter = {name = candidate.name, quality = 'normal'}
+        local count = 0
+        for _, source in ipairs(sources) do
+            for _, inv in ipairs(inv_list) do
+                local inventory = source.get_inventory(inv)
+                if inventory and inventory.valid then
+                    count = count + inventory.get_item_count(filter)
+                end
+            end
+        end
+        local cursor = player.cursor_stack
+        if cursor and cursor.valid_for_read and cursor.name == candidate.name and cursor.quality.name == 'normal' then
+            count = count + cursor.count
+        end
+        if count >= candidate.count then return candidate end
+    end
+end
+
+local function get_items_from_inv(entity, item_stack, cheat, at_least_one)
+    if cheat then
+        return { name = item_stack.name, count = item_stack.count, health = 1, quality = item_stack.quality }
+    end
+
+    local sources = get_item_sources(entity)
 
     local new_item_stack = { name = item_stack.name, count = 0, health = 1, quality = item_stack.quality }
     local count = item_stack.count
@@ -1670,7 +1699,7 @@ local function queue_ghosts_in_range(player, pos, nano_ammo)
         if deconstruct then
             if ghost.type == 'cliff' then
                 if player.force.technologies['nanobots-cliff'].researched then
-                    local item_stack = local_find_item(explosives, player, false)
+                    local item_stack = find_cliff_explosive(player)
                     if item_stack then
                         local explosive = get_items_from_inv(player, item_stack, player.cheat_mode)
                         if explosive then
